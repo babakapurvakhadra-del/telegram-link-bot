@@ -6,83 +6,97 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# 🔴 YOUR PRIVATE TELEGRAM ID
 LOG_CHAT_ID = 6609362058
+
+# 👑 Admin user IDs
+ADMINS = {6609362058}
 
 logging.basicConfig(level=logging.INFO)
 
-# ✅ SAFE DOMAINS (always allowed)
+# 🔥 URL detection (important improvement)
+URL_PATTERN = re.compile(r"(https?://\S+|www\.\S+)")
+
+# 🚨 suspicious keywords
+SUSPICIOUS_KEYWORDS = [
+    "free money",
+    "click here",
+    "earn $",
+    "bitcoin giveaway",
+    "airdrop",
+    "claim now"
+]
+
+# ✅ allowed safe domains
 SAFE_DOMAINS = [
     "youtube.com",
     "youtu.be",
-    "instagram.com",
-    "facebook.com",
-    "whatsapp.com",
-    "amazon.in",
-    "flipkart.com"
+    "t.me",
+    "telegram.me"
 ]
 
-# ❌ SUSPICIOUS PATTERNS
-SUSPICIOUS_PATTERNS = [
-    r"bit\.ly",
-    r"tinyurl",
-    r"t\.me\/\+",
-    r"free\s*money",
-    r"crypto\s*giveaway",
-    r"earn\s*money\s*fast",
-]
 
-# ---------- CHECK FUNCTION ----------
+def is_safe_link(text: str) -> bool:
+    text = text.lower()
+
+    for domain in SAFE_DOMAINS:
+        if domain in text:
+            return True
+
+    return False
+
+
 def is_suspicious(text: str) -> bool:
     text = text.lower()
 
-    # Allow safe domains
-    for domain in SAFE_DOMAINS:
-        if domain in text:
-            return False
+    # keyword check
+    for word in SUSPICIOUS_KEYWORDS:
+        if word in text:
+            return True
 
-    # Check suspicious patterns
-    return any(re.search(pattern, text) for pattern in SUSPICIOUS_PATTERNS)
+    # URL check
+    urls = URL_PATTERN.findall(text)
 
-# ---------- START COMMAND ----------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot active and monitoring links ✅")
+    for url in urls:
+        if not is_safe_link(url):
+            return True
 
-# ---------- MESSAGE HANDLER ----------
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    return False
+
+
+async def log_to_private(update: Update, reason: str):
     user = update.effective_user
+    msg = update.message.text
 
-    if not message or not message.text:
+    log_text = (
+        f"🚨 LINK BLOCKED\n"
+        f"User: {user.full_name}\n"
+        f"Username: @{user.username}\n"
+        f"Reason: {reason}\n"
+        f"Message: {msg}"
+    )
+
+    await update.get_bot().send_message(chat_id=LOG_CHAT_ID, text=log_text)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Bot active")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+
+    # 👑 admin bypass
+    if user_id in ADMINS:
         return
 
-    text = message.text
-
-    # Get admin list
-    chat_admins = await context.bot.get_chat_administrators(update.effective_chat.id)
-    admin_ids = [admin.user.id for admin in chat_admins]
-
-    # Admin bypass
-    if user.id in admin_ids:
-        return
-
-    # Check suspicious
+    # 🚨 suspicious detection
     if is_suspicious(text):
-        await message.delete()
+        await update.message.delete()
+        await log_to_private(update, "Suspicious content detected")
+        return
 
-        log_text = (
-            f"🚨 Suspicious Link Removed\n"
-            f"User: {user.full_name}\n"
-            f"Username: @{user.username}\n"
-            f"Message: {text}"
-        )
 
-        try:
-            await context.bot.send_message(LOG_CHAT_ID, log_text)
-        except Exception as e:
-            logging.error(f"Log failed: {e}")
-
-# ---------- MAIN ----------
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -92,6 +106,7 @@ def main():
     print("Bot started successfully")
 
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
