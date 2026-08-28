@@ -22,7 +22,7 @@ def run_server():
 
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
-# ---------------- START COMMAND ----------------
+# ---------------- START ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_message:
         await update.effective_message.reply_text("Bot active")
@@ -58,7 +58,7 @@ async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Delete error: {e}")
 
-# ---------------- MAIN (IMPORTANT FIX) ----------------
+# ---------------- MAIN (FIXED FOR RENDER) ----------------
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
@@ -72,12 +72,15 @@ def main():
 
     logger.info("Bot started successfully")
 
-    # keep alive server (Render requirement)
+    # keep alive server
     Thread(target=run_server, daemon=True).start()
 
-    # IMPORTANT: DO NOT use asyncio.run()
-    app.run_polling(drop_pending_updates=True)
+    # IMPORTANT FIX:
+    # DO NOT use run_polling on Render free web service with Python 3.14 issue
+    app.run_polling(
+        drop_pending_updates=True,
+        stop_signals=None
+    )
 
-# ---------------- ENTRY POINT ----------------
 if __name__ == "__main__":
     main()
