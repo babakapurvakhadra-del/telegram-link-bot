@@ -11,7 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- KEEP ALIVE SERVER (RENDER WEB SERVICE FIX) ----------------
+# ---------------- KEEP ALIVE SERVER ----------------
 def run_server():
     port = int(os.environ.get("PORT", 10000))
 
@@ -44,7 +44,7 @@ def has_link(text: str) -> bool:
         ]
     )
 
-# ---------------- DELETE MESSAGE ----------------
+# ---------------- DELETE LOGIC ----------------
 async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = update.effective_message
@@ -61,7 +61,7 @@ async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Delete error: {e}")
 
 # ---------------- MAIN ----------------
-def main():
+async def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
     if not token:
@@ -69,18 +69,21 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, delete_links))
 
     logger.info("Bot started successfully")
 
-    # keep alive server (Render requirement)
+    # start web server (Render requirement)
     Thread(target=run_server, daemon=True).start()
 
-    # FIX for Render + Python async issue
-    app.run_polling(drop_pending_updates=True, close_loop=False)
+    # run bot
+    await app.run_polling(drop_pending_updates=True)
 
-# ---------------- START ----------------
+# ---------------- ENTRY POINT (FIXED FOR RENDER) ----------------
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except RuntimeError:
+        # fallback for Render environment
+        main()
