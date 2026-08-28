@@ -19,15 +19,15 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-# ---------------- START COMMAND ----------------
+# ---------------- START ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(
-            "👋 Bot is active.\nI will delete suspicious links only."
+            "👋 Bot is active.\nI delete links only (no ban, no kick)."
         )
 
-# ---------------- HELP COMMAND ----------------
+# ---------------- HELP ----------------
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
@@ -35,7 +35,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/start - start bot\n/help - help"
         )
 
-# ---------------- LINK DETECTION ----------------
+# ---------------- LINK CHECK ----------------
 
 def has_link(text: str) -> bool:
     text = text.lower()
@@ -47,14 +47,14 @@ def has_link(text: str) -> bool:
         ".com" in text
     )
 
-# ---------------- DELETE FUNCTION ----------------
+# ---------------- DELETE LOGIC ----------------
 
 async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update.message:
-            text = update.message.text or update.message.caption
+            text = update.message.text or update.message.caption or ""
 
-            if text and has_link(text):
+            if has_link(text):
                 await update.message.delete()
 
     except Exception as e:
@@ -74,10 +74,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
 
-    # IMPORTANT: group message handler
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, delete_links)
-    )
+    # IMPORTANT FIX: catch all message types
+    app.add_handler(MessageHandler(filters.ALL, delete_links))
 
     logger.info("Bot started successfully")
     app.run_polling()
