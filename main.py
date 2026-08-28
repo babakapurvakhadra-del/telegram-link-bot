@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- KEEP ALIVE SERVER ----------------
+# ---------------- KEEP ALIVE SERVER (RENDER NEEDS THIS) ----------------
 def run_server():
     port = int(os.environ.get("PORT", 10000))
 
@@ -22,19 +22,31 @@ def run_server():
 
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
+
 # ---------------- START COMMAND ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot active")
+    if update.effective_message:
+        await update.effective_message.reply_text("Bot is active ✅")
 
-# ---------------- LINK CHECK ----------------
+
+# ---------------- LINK DETECTOR ----------------
 def has_link(text: str) -> bool:
     if not text:
         return False
 
     text = text.lower()
-    return any(x in text for x in ["http://", "https://", "www.", "t.me/"])
 
-# ---------------- DELETE MESSAGE ----------------
+    return any(
+        x in text for x in [
+            "http://",
+            "https://",
+            "www.",
+            "t.me/"
+        ]
+    )
+
+
+# ---------------- DELETE LINKS ----------------
 async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = update.effective_message
@@ -45,12 +57,13 @@ async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if has_link(text):
             await msg.delete()
-            logger.info("Deleted link message")
+            logger.info("Deleted suspicious link message")
 
     except Exception as e:
         logger.error(f"Delete error: {e}")
 
-# ---------------- MAIN (FIXED FOR RENDER) ----------------
+
+# ---------------- MAIN ----------------
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
@@ -59,17 +72,18 @@ def main():
 
     app = Application.builder().token(token).build()
 
+    # handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, delete_links))
 
     logger.info("Bot started successfully")
 
-    # keep render alive
+    # keep alive server for Render
     Thread(target=run_server, daemon=True).start()
 
-    # IMPORTANT FIX: use run_polling WITHOUT loop errors
-    app.run_polling(drop_pending_updates=True)
+    # start bot (IMPORTANT FIX FOR RENDER)
+    app.run_polling(drop_pending_updates=True, stop_signals=None)
 
-# ---------------- ENTRY ----------------
+
 if __name__ == "__main__":
     main()
