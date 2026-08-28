@@ -2,6 +2,7 @@ import logging
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
+import asyncio
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -10,7 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- KEEP ALIVE SERVER (RENDER NEEDS THIS) ----------------
+# ---------------- KEEP ALIVE SERVER ----------------
 def run_server():
     port = int(os.environ.get("PORT", 10000))
 
@@ -22,31 +23,21 @@ def run_server():
 
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
-
 # ---------------- START COMMAND ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_message:
-        await update.effective_message.reply_text("Bot is active ✅")
+        await update.effective_message.reply_text("Bot active")
 
-
-# ---------------- LINK DETECTOR ----------------
+# ---------------- LINK DETECTION ----------------
 def has_link(text: str) -> bool:
     if not text:
         return False
 
     text = text.lower()
 
-    return any(
-        x in text for x in [
-            "http://",
-            "https://",
-            "www.",
-            "t.me/"
-        ]
-    )
+    return any(x in text for x in ["http://", "https://", "www.", "t.me/"])
 
-
-# ---------------- DELETE LINKS ----------------
+# ---------------- DELETE MESSAGE ----------------
 async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = update.effective_message
@@ -57,11 +48,10 @@ async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if has_link(text):
             await msg.delete()
-            logger.info("Deleted suspicious link message")
+            logger.info("Deleted link message")
 
     except Exception as e:
         logger.error(f"Delete error: {e}")
-
 
 # ---------------- MAIN ----------------
 def main():
@@ -72,18 +62,22 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, delete_links))
 
     logger.info("Bot started successfully")
 
-    # keep alive server for Render
+    # Keep Render web service alive
     Thread(target=run_server, daemon=True).start()
 
-    # start bot (IMPORTANT FIX FOR RENDER)
-    app.run_polling(drop_pending_updates=True, stop_signals=None)
+    # FIX: proper asyncio event loop for Render
+    async def run():
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        await app.updater.idle()
 
+    asyncio.run(run())
 
 if __name__ == "__main__":
     main()
