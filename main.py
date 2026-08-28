@@ -1,22 +1,16 @@
 import logging
 import os
-from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- KEEP ALIVE SERVER (RENDER FIX) ----------------
+# ---------------- KEEP ALIVE SERVER (REQUIRED FOR RENDER WEB SERVICE) ----------------
 def run_server():
     port = int(os.environ.get("PORT", 10000))
 
@@ -26,15 +20,14 @@ def run_server():
             self.end_headers()
             self.wfile.write(b"Bot is running")
 
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
-# ---------------- COMMAND: START ----------------
+# ---------------- START COMMAND ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_message:
         await update.effective_message.reply_text("Bot active")
 
-# ---------------- LINK CHECK ----------------
+# ---------------- LINK DETECTION ----------------
 def has_link(text: str) -> bool:
     if not text:
         return False
@@ -46,12 +39,11 @@ def has_link(text: str) -> bool:
             "http://",
             "https://",
             "www.",
-            "t.me/",
-            ".com"
+            "t.me/"
         ]
     )
 
-# ---------------- DELETE LOGIC ----------------
+# ---------------- DELETE MESSAGE ----------------
 async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         msg = update.effective_message
@@ -62,10 +54,10 @@ async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if has_link(text):
             await msg.delete()
-            logger.info("Deleted a link message")
+            logger.info("Deleted link message")
 
     except Exception as e:
-        logger.error(f"Error deleting message: {e}")
+        logger.error(f"Delete error: {e}")
 
 # ---------------- MAIN ----------------
 def main():
@@ -76,19 +68,16 @@ def main():
 
     app = Application.builder().token(token).build()
 
-    # commands
     app.add_handler(CommandHandler("start", start))
-
-    # only text/caption messages (clean + safe)
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, delete_links))
 
-    logger.info("Bot started successfully")
+    logger.info("Bot started")
 
-    # start web server for Render
+    # IMPORTANT for Render Web Service
     Thread(target=run_server, daemon=True).start()
 
-    # start telegram bot
-    app.run_polling()
+    # Telegram bot polling
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
