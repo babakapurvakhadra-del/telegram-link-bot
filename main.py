@@ -7,7 +7,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # 🔴 PUT YOUR PRIVATE LOG CHAT ID HERE (your Telegram ID or channel ID)
-LOG_CHAT_ID = None  # example: 123456789
+LOG_CHAT_ID = 6609362058  # example: 123456789
 
 logging.basicConfig(level=logging.INFO)
 
