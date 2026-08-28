@@ -35,6 +35,17 @@ SAFE_DOMAINS = [
     "telegram.me"
 ]
 
+SUSPICIOUS_DOMAINS = [
+    "bit.ly",
+    "tinyurl",
+    "shorturl",
+    "free",
+    "claim",
+    "airdrop",
+    "earn",
+    "gift"
+]
+
 SUSPICIOUS_KEYWORDS = [
     "free money",
     "click here",
@@ -42,27 +53,17 @@ SUSPICIOUS_KEYWORDS = [
     "bitcoin giveaway",
     "instant reward",
     "claim now",
-    "urgent win"
-]
-
-SUSPICIOUS_DOMAINS = [
-    "bit.ly",
-    "tinyurl",
-    "shorturl",
-    "airdrop",
-    "claim",
-    "earn",
-    "gift"
+    "urgent win",
 ]
 
 # ======================
-# USER TRACKING
+# USER WARN TRACKING
 # ======================
 
 user_warnings = defaultdict(int)
 
 # ======================
-# DETECTION
+# DETECTION LOGIC
 # ======================
 
 def is_suspicious(text: str) -> bool:
@@ -73,34 +74,36 @@ def is_suspicious(text: str) -> bool:
         if word in text:
             return True
 
+    # url check
     urls = URL_PATTERN.findall(text)
 
     for url in urls:
         url_low = url.lower()
 
-        # ✅ allow safe links
+        # allow safe links
         if any(domain in url_low for domain in SAFE_DOMAINS):
             continue
 
-        # ❌ block known bad domains
-        if any(domain in url_low for domain in SUSPICIOUS_DOMAINS):
+        # block suspicious domains
+        if any(bad in url_low for bad in SUSPICIOUS_DOMAINS):
             return True
 
-        # ❌ unknown external links = suspicious
-        if "http" in url_low or "www" in url_low:
+        # any unknown external link = suspicious
+        if url.startswith("http"):
             return True
 
     return False
 
+
 # ======================
-# LOGGING (FIXED)
+# PRIVATE LOGGING
 # ======================
 
-async def log_to_private(update: Update, reason: str, context: ContextTypes.DEFAULT_TYPE):
+async def log_to_private(update: Update, reason: str):
     user = update.effective_user
     msg = update.message.text
 
-    log_text = (
+    text = (
         "🚨 BLOCKED MESSAGE\n"
         f"User: {user.full_name}\n"
         f"Username: @{user.username}\n"
@@ -108,20 +111,22 @@ async def log_to_private(update: Update, reason: str, context: ContextTypes.DEFA
         f"Message: {msg}"
     )
 
-    await context.bot.send_message(
+    await update.get_bot().send_message(
         chat_id=LOG_CHAT_ID,
-        text=log_text
+        text=text
     )
 
+
 # ======================
-# START
+# START COMMAND
 # ======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot active")
 
+
 # ======================
-# HANDLER
+# MAIN HANDLER (FINAL LOGIC)
 # ======================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -132,28 +137,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in ADMINS:
         return
 
+    # check suspicious
     if is_suspicious(text):
 
         user_warnings[user_id] += 1
         count = user_warnings[user_id]
 
+        # ⚠️ STEP 1: warn only (NO group spam for every case)
         if count == 1:
-            await update.message.reply_text("⚠️ Warning: suspicious message detected.")
-            await log_to_private(update, "1st warning", context)
+            try:
+                await update.message.delete()
+            except:
+                pass
+            await log_to_private(update, "1st warning (deleted)")
 
+        # ⚠️ STEP 2: delete + log
         elif count == 2:
             try:
                 await update.message.delete()
             except:
                 pass
-            await log_to_private(update, "2nd warning - deleted", context)
+            await log_to_private(update, "2nd warning (deleted)")
 
+        # ⚠️ STEP 3+: strict delete
         else:
             try:
                 await update.message.delete()
             except:
                 pass
-            await log_to_private(update, "3rd warning - banned level", context)
+            await log_to_private(update, "3rd+ violation (deleted)")
+
+        return
+
+    # safe message → do nothing
+    return
+
 
 # ======================
 # ERROR HANDLER
@@ -162,8 +180,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Bot error: {context.error}")
 
+
 # ======================
-# MAIN
+# RUN BOT
 # ======================
 
 def main():
@@ -176,6 +195,7 @@ def main():
     print("Bot started successfully")
 
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
