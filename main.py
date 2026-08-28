@@ -1,6 +1,8 @@
-import os
 import logging
-from flask import Flask, request
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -8,64 +10,66 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- FLASK APP ----------------
-app_web = Flask(__name__)
+# ---------------- KEEP ALIVE SERVER ----------------
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is running")
 
-if not TOKEN:
-    raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
-# ---------------- BOT ----------------
-app = Application.builder().token(TOKEN).build()
-
-# start command
+# ---------------- START COMMAND ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot active")
 
-# link detection
+# ---------------- LINK CHECK ----------------
 def has_link(text: str) -> bool:
     if not text:
         return False
+
     text = text.lower()
     return any(x in text for x in ["http://", "https://", "www.", "t.me/"])
 
-# delete messages
+# ---------------- DELETE MESSAGE ----------------
 async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    if not msg:
-        return
+    try:
+        msg = update.effective_message
+        if not msg:
+            return
 
-    text = msg.text or msg.caption or ""
+        text = msg.text or msg.caption or ""
 
-    if has_link(text):
-        await msg.delete()
-        logger.info("Deleted link")
+        if has_link(text):
+            await msg.delete()
+            logger.info("Deleted link message")
 
-# handlers
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, delete_links))
+    except Exception as e:
+        logger.error(f"Delete error: {e}")
 
-# ---------------- WEBHOOK ROUTE ----------------
-@app_web.post("/")
-async def webhook():
-    update = Update.de_json(request.get_json(force=True), app.bot)
-    await app.process_update(update)
-    return "ok"
+# ---------------- MAIN (FIXED FOR RENDER) ----------------
+def main():
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
 
-@app_web.get("/")
-def home():
-    return "Bot is running"
+    if not token:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN")
 
-# ---------------- RUN ----------------
+    app = Application.builder().token(token).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, delete_links))
+
+    logger.info("Bot started successfully")
+
+    # keep render alive
+    Thread(target=run_server, daemon=True).start()
+
+    # IMPORTANT FIX: use run_polling WITHOUT loop errors
+    app.run_polling(drop_pending_updates=True)
+
+# ---------------- ENTRY ----------------
 if __name__ == "__main__":
-    import asyncio
-
-    async def run():
-        await app.initialize()
-        await app.start()
-
-        port = int(os.environ.get("PORT", 10000))
-        app_web.run(host="0.0.0.0", port=port)
-
-    asyncio.run(run())
+    main()
