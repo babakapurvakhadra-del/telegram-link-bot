@@ -28,9 +28,23 @@ logging.basicConfig(level=logging.INFO)
 
 URL_PATTERN = re.compile(r"(https?://[^\s]+|www\.[^\s]+)")
 
-SAFE_DOMAINS = ["youtube.com", "youtu.be", "t.me", "telegram.me"]
+SAFE_DOMAINS = [
+    "youtube.com",
+    "youtu.be",
+    "t.me",
+    "telegram.me"
+]
 
-SUSPICIOUS_DOMAINS = ["bit.ly", "tinyurl", "shorturl", "free", "claim", "airdrop"]
+SUSPICIOUS_DOMAINS = [
+    "bit.ly",
+    "tinyurl",
+    "shorturl",
+    "free",
+    "claim",
+    "airdrop",
+    "earn",
+    "gift"
+]
 
 SUSPICIOUS_KEYWORDS = [
     "free money",
@@ -39,17 +53,17 @@ SUSPICIOUS_KEYWORDS = [
     "bitcoin giveaway",
     "instant reward",
     "claim now",
-    "urgent win",
+    "urgent win"
 ]
 
 # ======================
-# USER TRACKING (STEP 2 CORE)
+# USER TRACKING
 # ======================
 
 user_warnings = defaultdict(int)
 
 # ======================
-# DETECTION
+# DETECTION LOGIC
 # ======================
 
 def is_suspicious(text: str) -> bool:
@@ -66,27 +80,29 @@ def is_suspicious(text: str) -> bool:
     for url in urls:
         url_low = url.lower()
 
+        # allow safe domains
         if any(domain in url_low for domain in SAFE_DOMAINS):
             continue
 
-        if any(bad in url_low for bad in SUSPICIOUS_DOMAINS):
+        # block suspicious domains
+        if any(domain in url_low for domain in SUSPICIOUS_DOMAINS):
             return True
 
+        # unknown links = risky
         if url.startswith("http"):
             return True
 
     return False
 
-
 # ======================
-# LOGGING
+# LOGGING FUNCTION
 # ======================
 
 async def log_to_private(update: Update, reason: str):
     user = update.effective_user
     msg = update.message.text
 
-    text = (
+    log_text = (
         "🚨 BLOCKED MESSAGE\n"
         f"User: {user.full_name}\n"
         f"Username: @{user.username}\n"
@@ -94,40 +110,39 @@ async def log_to_private(update: Update, reason: str):
         f"Message: {msg}"
     )
 
-    await update.get_bot().send_message(LOG_CHAT_ID, text)
-
+    await update.get_bot().send_message(
+        chat_id=LOG_CHAT_ID,
+        text=log_text
+    )
 
 # ======================
-# COMMANDS
+# START COMMAND
 # ======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot active")
 
-
 # ======================
-# MAIN LOGIC (STEP 2)
+# MESSAGE HANDLER
 # ======================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    text = update.message.text
 
+    # admin bypass
     if user_id in ADMINS:
         return
-
-    text = update.message.text
 
     if is_suspicious(text):
 
         user_warnings[user_id] += 1
         count = user_warnings[user_id]
 
-        # 1st warning
         if count == 1:
             await update.message.reply_text("⚠️ Warning: suspicious message detected.")
             await log_to_private(update, "1st warning")
 
-        # 2nd delete
         elif count == 2:
             try:
                 await update.message.delete()
@@ -135,16 +150,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             await log_to_private(update, "2nd warning - deleted")
 
-        # 3rd strict delete
         else:
             try:
                 await update.message.delete()
             except:
                 pass
-            await log_to_private(update, "3rd+ warning - repeated spam")
-
-        return
-
+            await log_to_private(update, "3rd+ warning - repeat spam")
 
 # ======================
 # ERROR HANDLER
@@ -153,9 +164,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Error: {context.error}")
 
-
 # ======================
-# RUN
+# MAIN (IMPORTANT FIX FOR RENDER)
 # ======================
 
 def main():
@@ -167,8 +177,10 @@ def main():
 
     print("Bot started successfully")
 
-    app.run_polling(drop_pending_updates=True)
-
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 if __name__ == "__main__":
     main()
