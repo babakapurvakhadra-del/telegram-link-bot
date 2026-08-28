@@ -2,7 +2,6 @@ import logging
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
-import asyncio
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -34,7 +33,6 @@ def has_link(text: str) -> bool:
         return False
 
     text = text.lower()
-
     return any(x in text for x in ["http://", "https://", "www.", "t.me/"])
 
 # ---------------- DELETE MESSAGE ----------------
@@ -67,17 +65,11 @@ def main():
 
     logger.info("Bot started successfully")
 
-    # Keep Render web service alive
+    # keep Render alive
     Thread(target=run_server, daemon=True).start()
 
-    # FIX: proper asyncio event loop for Render
-    async def run():
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling()
-        await app.updater.idle()
-
-    asyncio.run(run())
+    # ✅ CORRECT PTB 21.x WAY (NO Updater, NO idle, NO asyncio hacks)
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
