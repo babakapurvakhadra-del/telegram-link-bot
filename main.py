@@ -22,12 +22,12 @@ ADMINS = {6609362058}     # your admin user ID
 logging.basicConfig(level=logging.INFO)
 
 # ======================
-# URL DETECTION (REAL LINKS)
+# URL DETECTION
 # ======================
 URL_PATTERN = re.compile(r"(https?://[^\s]+|www\.[^\s]+)")
 
 # ======================
-# SAFE DOMAINS (NOT BLOCKED)
+# SAFE DOMAINS (ALLOWED)
 # ======================
 SAFE_DOMAINS = [
     "youtube.com",
@@ -37,7 +37,7 @@ SAFE_DOMAINS = [
 ]
 
 # ======================
-# SUSPICIOUS DOMAINS (BLOCKED LINKS)
+# SUSPICIOUS DOMAINS (BLOCKED)
 # ======================
 SUSPICIOUS_DOMAINS = [
     "bit.ly",
@@ -47,7 +47,8 @@ SUSPICIOUS_DOMAINS = [
     "claim",
     "airdrop",
     "earn",
-    "gift"
+    "gift",
+    "spam",
 ]
 
 # ======================
@@ -60,23 +61,13 @@ SUSPICIOUS_KEYWORDS = [
     "bitcoin giveaway",
     "instant reward",
     "claim now",
-    "urgent win"
+    "urgent win",
 ]
 
 
 # ======================
-# CHECK FUNCTIONS
+# DETECTION LOGIC
 # ======================
-
-def contains_safe_domain(text: str) -> bool:
-    text = text.lower()
-    return any(domain in text for domain in SAFE_DOMAINS)
-
-
-def contains_suspicious_domain(text: str) -> bool:
-    text = text.lower()
-    return any(domain in text for domain in SUSPICIOUS_DOMAINS)
-
 
 def is_suspicious(text: str) -> bool:
     text = text.lower()
@@ -92,15 +83,15 @@ def is_suspicious(text: str) -> bool:
     for url in urls:
         url_low = url.lower()
 
-        # allow safe links
+        # ✔ SAFE LINKS (allow)
         if any(domain in url_low for domain in SAFE_DOMAINS):
             continue
 
-        # block suspicious domains
-        if any(domain in url_low for domain in SUSPICIOUS_DOMAINS):
+        # ❌ BLOCK suspicious domains
+        if any(bad in url_low for bad in SUSPICIOUS_DOMAINS):
             return True
 
-        # unknown external link = suspicious
+        # ❌ unknown external links (treat as risky)
         if url.startswith("http"):
             return True
 
@@ -108,7 +99,7 @@ def is_suspicious(text: str) -> bool:
 
 
 # ======================
-# LOGGING
+# PRIVATE LOGS
 # ======================
 
 async def log_to_private(update: Update, reason: str):
@@ -116,7 +107,7 @@ async def log_to_private(update: Update, reason: str):
     msg = update.message.text
 
     log_text = (
-        "🚨 SUSPICIOUS MESSAGE BLOCKED\n"
+        "🚨 MESSAGE BLOCKED\n"
         f"User: {user.full_name}\n"
         f"Username: @{user.username}\n"
         f"Reason: {reason}\n"
@@ -138,7 +129,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ======================
-# MAIN FILTER
+# MESSAGE HANDLER
 # ======================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,7 +140,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in ADMINS:
         return
 
-    # 🚨 detect suspicious
+    # 🚨 detect spam/suspicious
     if is_suspicious(text):
         try:
             await update.message.delete()
@@ -169,7 +160,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ======================
-# RUN BOT
+# MAIN RUN
 # ======================
 
 def main():
