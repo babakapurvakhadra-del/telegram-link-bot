@@ -6,12 +6,23 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# 🔴 PUT YOUR PRIVATE LOG CHAT ID HERE (your Telegram ID or channel ID)
-LOG_CHAT_ID = 6609362058  # example: 123456789
+# 🔴 YOUR PRIVATE TELEGRAM ID
+LOG_CHAT_ID = 6609362058
 
 logging.basicConfig(level=logging.INFO)
 
-# ---------- SUSPICIOUS LINK PATTERN ----------
+# ✅ SAFE DOMAINS (always allowed)
+SAFE_DOMAINS = [
+    "youtube.com",
+    "youtu.be",
+    "instagram.com",
+    "facebook.com",
+    "whatsapp.com",
+    "amazon.in",
+    "flipkart.com"
+]
+
+# ❌ SUSPICIOUS PATTERNS
 SUSPICIOUS_PATTERNS = [
     r"bit\.ly",
     r"tinyurl",
@@ -21,17 +32,23 @@ SUSPICIOUS_PATTERNS = [
     r"earn\s*money\s*fast",
 ]
 
+# ---------- CHECK FUNCTION ----------
 def is_suspicious(text: str) -> bool:
     text = text.lower()
-    return any(re.search(pattern, text) for pattern in SUSPICIOUS_PATTERNS)
 
+    # Allow safe domains
+    for domain in SAFE_DOMAINS:
+        if domain in text:
+            return False
+
+    # Check suspicious patterns
+    return any(re.search(pattern, text) for pattern in SUSPICIOUS_PATTERNS)
 
 # ---------- START COMMAND ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot active and monitoring links ✅")
 
-
-# ---------- MAIN MESSAGE HANDLER ----------
+# ---------- MESSAGE HANDLER ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     user = update.effective_user
@@ -45,11 +62,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_admins = await context.bot.get_chat_administrators(update.effective_chat.id)
     admin_ids = [admin.user.id for admin in chat_admins]
 
-    # If admin → ignore completely
+    # Admin bypass
     if user.id in admin_ids:
         return
 
-    # Check links
+    # Check suspicious
     if is_suspicious(text):
         await message.delete()
 
@@ -60,13 +77,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Message: {text}"
         )
 
-        # Send log if enabled
-        if LOG_CHAT_ID:
-            try:
-                await context.bot.send_message(LOG_CHAT_ID, log_text)
-            except Exception as e:
-                logging.error(f"Log failed: {e}")
-
+        try:
+            await context.bot.send_message(LOG_CHAT_ID, log_text)
+        except Exception as e:
+            logging.error(f"Log failed: {e}")
 
 # ---------- MAIN ----------
 def main():
@@ -78,7 +92,6 @@ def main():
     print("Bot started successfully")
 
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
