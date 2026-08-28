@@ -1,6 +1,5 @@
 import logging
 import os
-import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 
@@ -28,13 +27,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_message:
         await update.effective_message.reply_text("Bot active")
 
-# ---------------- LINK DETECTION ----------------
+# ---------------- LINK CHECK ----------------
 def has_link(text: str) -> bool:
     if not text:
         return False
 
     text = text.lower()
-
     return any(
         x in text for x in [
             "http://",
@@ -60,8 +58,8 @@ async def delete_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Delete error: {e}")
 
-# ---------------- MAIN ----------------
-async def main():
+# ---------------- MAIN (IMPORTANT FIX) ----------------
+def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
     if not token:
@@ -74,16 +72,12 @@ async def main():
 
     logger.info("Bot started successfully")
 
-    # start web server (Render requirement)
+    # keep alive server (Render requirement)
     Thread(target=run_server, daemon=True).start()
 
-    # run bot
-    await app.run_polling(drop_pending_updates=True)
+    # IMPORTANT: DO NOT use asyncio.run()
+    app.run_polling(drop_pending_updates=True)
 
-# ---------------- ENTRY POINT (FIXED FOR RENDER) ----------------
+# ---------------- ENTRY POINT ----------------
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except RuntimeError:
-        # fallback for Render environment
-        main()
+    main()
