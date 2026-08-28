@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 
@@ -10,7 +11,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- KEEP ALIVE SERVER (REQUIRED FOR RENDER WEB SERVICE) ----------------
+# ---------------- KEEP ALIVE SERVER (RENDER WEB SERVICE FIX) ----------------
 def run_server():
     port = int(os.environ.get("PORT", 10000))
 
@@ -68,18 +69,18 @@ def main():
 
     app = Application.builder().token(token).build()
 
+    # handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, delete_links))
 
-    logger.info("Bot started")
+    logger.info("Bot started successfully")
 
-    # IMPORTANT for Render Web Service
+    # keep alive server (Render requirement)
     Thread(target=run_server, daemon=True).start()
 
-    # Telegram bot polling
-    app.run_polling(drop_pending_updates=True)
+    # FIX for Render + Python async issue
+    app.run_polling(drop_pending_updates=True, close_loop=False)
 
+# ---------------- START ----------------
 if __name__ == "__main__":
     main()
-
-# rebuild fix
