@@ -4,14 +4,13 @@ import re
 import time
 from collections import defaultdict
 
-from telegram import Update, ChatMemberUpdated
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     filters,
-    ChatMemberHandler
 )
 
 from keep_alive import keep_alive
@@ -23,8 +22,9 @@ import wikipedia
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-LOG_CHAT_ID = 6609362058
-ADMINS = {6609362058}
+LOG_CHAT_ID = int(os.getenv("LOG_CHAT_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMINS = {ADMIN_ID}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,22 +36,40 @@ start_time = time.time()
 
 user_warnings = defaultdict(int)
 muted_users = set()
+
 allowed_domains = set(["youtube.com", "youtu.be", "t.me", "telegram.me"])
 blocked_domains = set()
 
 known_users = {}
 
 # ======================
-# PATTERNS
+# PATTERN
 # ======================
 
 URL_PATTERN = re.compile(r"(https?://[^\s]+|www\.[^\s]+)")
+
+# ======================
+# ERROR HANDLER
+# ======================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    print("BOT ERROR:", context.error)
+
+# ======================
+# KEEP ALIVE
+# ======================
+
+def start_server():
+    keep_alive()
 
 # ======================
 # DETECTION
 # ======================
 
 def is_suspicious(text: str) -> bool:
+    if not text:
+        return False
+
     text = text.lower()
     urls = URL_PATTERN.findall(text)
 
@@ -70,14 +88,12 @@ def is_suspicious(text: str) -> bool:
     return False
 
 # ======================
-# PRIVATE LOG
+# LOGGING
 # ======================
 
 async def log_private(context, text):
-    try:
+    if LOG_CHAT_ID:
         await context.bot.send_message(chat_id=LOG_CHAT_ID, text=text)
-    except Exception as e:
-        logging.error(f"Log error: {e}")
 
 # ======================
 # NEW MEMBER
@@ -93,27 +109,6 @@ async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Username: @{user.username if user.username else 'No username'}\n"
             f"User ID: {user.id}\n"
             f"Language: {user.language_code}"
-        )
-
-        await log_private(context, text)
-
-# ======================
-# BOT ADDED TRACK
-# ======================
-
-async def bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    result: ChatMemberUpdated = update.my_chat_member
-
-    if result.new_chat_member.status in ("member", "administrator"):
-        chat = result.chat
-        user = result.from_user
-
-        text = (
-            "🤖 BOT ADDED\n"
-            f"Group: {chat.title}\n"
-            f"Group ID: {chat.id}\n"
-            f"Added by: {user.full_name}\n"
-            f"User ID: {user.id}"
         )
 
         await log_private(context, text)
@@ -140,27 +135,6 @@ async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await log_private(context, text)
 
 # ======================
-# FIND USER (FROM MEMORY)
-# ======================
-
-async def finduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /finduser name")
-        return
-
-    query = " ".join(context.args).lower()
-
-    results = []
-    for user in known_users.values():
-        if query in (user.full_name or "").lower() or query in (user.username or "").lower():
-            results.append(f"{user.full_name} (@{user.username}) - {user.id}")
-
-    if results:
-        await log_private(context, "🔍 USER SEARCH\n" + "\n".join(results[:10]))
-    else:
-        await update.message.reply_text("No user found")
-
-# ======================
 # WARNINGS
 # ======================
 
@@ -169,35 +143,29 @@ async def warnings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Warnings: {user_warnings[user_id]}")
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        return
-
-    user_id = update.message.reply_to_message.from_user.id
-    user_warnings[user_id] = 0
-    await update.message.reply_text("Reset done")
+    if update.message.reply_to_message:
+        user_id = update.message.reply_to_message.from_user.id
+        user_warnings[user_id] = 0
+        await update.message.reply_text("Warnings reset")
 
 # ======================
 # MUTE / UNMUTE
 # ======================
 
 async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        return
-
-    user_id = update.message.reply_to_message.from_user.id
-    muted_users.add(user_id)
-    await update.message.reply_text("User muted")
+    if update.message.reply_to_message:
+        user_id = update.message.reply_to_message.from_user.id
+        muted_users.add(user_id)
+        await update.message.reply_text("User muted")
 
 async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        return
-
-    user_id = update.message.reply_to_message.from_user.id
-    muted_users.discard(user_id)
-    await update.message.reply_text("User unmuted")
+    if update.message.reply_to_message:
+        user_id = update.message.reply_to_message.from_user.id
+        muted_users.discard(user_id)
+        await update.message.reply_text("User unmuted")
 
 # ======================
-# LINK CONTROL SAFE
+# LINK CONTROL
 # ======================
 
 async def allow(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,7 +173,7 @@ async def allow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /allow domain.com")
         return
 
-    domain = context.args[0].lower()
+    domain = context.args[0]
     allowed_domains.add(domain)
     await update.message.reply_text(f"Allowed: {domain}")
 
@@ -214,30 +182,26 @@ async def block(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /block domain.com")
         return
 
-    domain = context.args[0].lower()
+    domain = context.args[0]
     blocked_domains.add(domain)
     await update.message.reply_text(f"Blocked: {domain}")
 
 # ======================
-# SEARCH (SAFE)
+# SEARCH
 # ======================
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
+    query = " ".join(context.args)
+
+    if not query:
         await update.message.reply_text("Usage: /search topic")
         return
-
-    query = " ".join(context.args)
 
     try:
         result = wikipedia.summary(query, sentences=2)
         await update.message.reply_text(result)
-    except wikipedia.exceptions.DisambiguationError:
-        await update.message.reply_text("Too many results, be specific")
-    except wikipedia.exceptions.PageError:
+    except:
         await update.message.reply_text("No result found")
-    except Exception:
-        await update.message.reply_text("Error occurred")
 
 # ======================
 # STATUS
@@ -245,7 +209,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = int(time.time() - start_time)
-    await update.message.reply_text(f"Uptime: {uptime} sec")
+    await update.message.reply_text(f"Bot uptime: {uptime} sec")
 
 # ======================
 # MESSAGE HANDLER
@@ -253,12 +217,19 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
+    if not update.message or not update.message.text:
+        return
+
     text = update.message.text
 
     known_users[user.id] = user
 
     if user.id in muted_users:
-        await update.message.delete()
+        try:
+            await update.message.delete()
+        except:
+            pass
         return
 
     if user.id in ADMINS:
@@ -272,19 +243,22 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-        await log_private(context, f"🚨 Deleted\nUser: {user.full_name}\nMessage: {text}")
+        await log_private(context, f"🚨 Deleted message from {user.full_name}")
 
 # ======================
-# MAIN
+# MAIN FUNCTION
 # ======================
 
 def main():
-    keep_alive()
+    start_server()
 
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # ✅ ERROR HANDLER (IMPORTANT)
+    app.add_error_handler(error_handler)
+
+    # COMMANDS
     app.add_handler(CommandHandler("userinfo", userinfo))
-    app.add_handler(CommandHandler("finduser", finduser))
     app.add_handler(CommandHandler("warnings", warnings))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("mute", mute))
@@ -294,13 +268,17 @@ def main():
     app.add_handler(CommandHandler("search", search))
     app.add_handler(CommandHandler("status", status))
 
+    # EVENTS
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
-    app.add_handler(ChatMemberHandler(bot_added, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
-    print("Bot started")
+    print("Bot started successfully")
 
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
+
+# ======================
+# START
+# ======================
 
 if __name__ == "__main__":
     main()
