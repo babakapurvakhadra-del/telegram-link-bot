@@ -10,6 +10,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from keep_alive import keep_alive
 
 # ======================
 # CONFIG
@@ -187,6 +188,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
 
+keep_alive()
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
