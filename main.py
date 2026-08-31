@@ -1,223 +1,147 @@
-import logging
 import os
-import re
 import time
-from collections import defaultdict
+import logging
+import sqlite3
+import wikipedia
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    CallbackQueryHandler,
-    filters,
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, filters
 )
 
-import wikipedia
 from keep_alive import keep_alive
 
-# ======================
-# CONFIG
-# ======================
-
+# ===== CONFIG =====
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LOG_CHAT_ID = int(os.getenv("LOG_CHAT_ID"))
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-ADMINS = {ADMIN_ID}
-
 logging.basicConfig(level=logging.INFO)
-start_time = time.time()
 
-# ======================
-# STORAGE
-# ======================
+# ===== DATABASE =====
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cursor = conn.cursor()
 
-user_warnings = defaultdict(int)
-muted_users = set()
-known_users = {}
-search_cache = {}
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    name TEXT,
+    username TEXT,
+    language TEXT
+)
+""")
 
-# ======================
-# PATTERN
-# ======================
+conn.commit()
 
-URL_PATTERN = re.compile(r"(https?://\S+|www\.\S+)")
+# ===== MEMORY =====
+search_cache = {}  # {(chat_id, user_id): results}
 
-# ======================
-# LOG
-# ======================
-
-async def log_private(context, text):
-    await context.bot.send_message(chat_id=LOG_CHAT_ID, text=text)
-
-# ======================
-# USER SAVE
-# ======================
-
+# ===== HELPERS =====
 def save_user(user):
-    known_users[user.id] = {
-        "name": user.full_name,
-        "username": user.username,
-        "language": user.language_code,
-    }
+    cursor.execute(
+        "INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?)",
+        (user.id, user.full_name, user.username, user.language_code)
+    )
+    conn.commit()
 
-# ======================
-# FIND USER
-# ======================
+async def log(context, text):
+    await context.bot.send_message(LOG_CHAT_ID, text)
 
+# ===== AUTO SAVE USERS =====
+async def track_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message and update.message.from_user:
+        save_user(update.message.from_user)
+
+# ===== USER FIND =====
 def find_user(query):
-    query = str(query).lower()
+    cursor.execute("SELECT * FROM users")
+    users = cursor.fetchall()
 
-    for uid, data in known_users.items():
-        if (
-            query == str(uid)
-            or (data["username"] and query == data["username"].lower())
-            or query in data["name"].lower()
-        ):
-            return uid, data
+    query = query.lower()
 
-    return None, None
+    for u in users:
+        uid, name, username, lang = u
 
-# ======================
-# NEW MEMBER
-# ======================
+        if str(uid) == query:
+            return u
 
-async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for user in update.message.new_chat_members:
-        save_user(user)
+        if username and ("@" + username).lower() == query:
+            return u
 
-        text = (
-            f"👤 NEW MEMBER\n"
-            f"Name: {user.full_name}\n"
-            f"Username: @{user.username if user.username else 'None'}\n"
-            f"User ID: {user.id}\n"
-            f"Language: {user.language_code}"
-        )
+        if name and query in name.lower():
+            return u
 
-        await log_private(context, text)
+    return None
 
-# ======================
-# USER INFO
-# ======================
-
+# ===== USERINFO =====
 async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = None
+    if context.args:
+        query = " ".join(context.args)
+        user = find_user(query)
+    elif update.message.reply_to_message:
+        u = update.message.reply_to_message.from_user
+        save_user(u)
+        user = (u.id, u.full_name, u.username, u.language_code)
+    else:
+        await update.message.reply_text("Reply or give username")
+        return
 
-    if update.message.reply_to_message:
-        user = update.message.reply_to_message.from_user
-        target = (user.id, known_users.get(user.id))
-
-    elif context.args:
-        uid, data = find_user(" ".join(context.args))
-        target = (uid, data)
-
-    if not target or not target[0]:
+    if not user:
         await update.message.reply_text("User not found")
         return
 
-    uid, data = target
+    text = f"📌 USER INFO\nName: {user[1]}\nUsername: @{user[2]}\nID: {user[0]}\nLang: {user[3]}"
+    await log(context, text)
+    await update.message.reply_text("Sent to log")
 
-    text = (
-        f"📌 USER INFO\n"
-        f"Name: {data['name']}\n"
-        f"Username: @{data['username'] if data['username'] else 'None'}\n"
-        f"User ID: {uid}\n"
-        f"Language: {data['language']}"
-    )
-
-    await log_private(context, text)
-    await update.message.reply_text("User info sent to private log")
-
-# ======================
-# SEARCH USER
-# ======================
-
+# ===== SEARCH USER =====
 async def searchuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        return await update.message.reply_text("Usage: /searchuser name")
+    query = " ".join(context.args)
+    user = find_user(query)
 
-    uid, data = find_user(" ".join(context.args))
+    if not user:
+        await update.message.reply_text("User not found")
+        return
 
-    if not uid:
-        return await update.message.reply_text("User not found")
+    await update.message.reply_text(f"Found: {user[1]} (@{user[2]})")
 
-    text = (
-        f"👤 FOUND USER\n"
-        f"Name: {data['name']}\n"
-        f"Username: @{data['username'] if data['username'] else 'None'}\n"
-        f"User ID: {uid}"
-    )
-
-    await update.message.reply_text(text)
-
-# ======================
-# MUTE / UNMUTE
-# ======================
-
-async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = None
-
-    if update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-    elif context.args:
-        uid, _ = find_user(" ".join(context.args))
-
-    if not uid:
-        return await update.message.reply_text("User not found")
-
-    muted_users.add(uid)
-    await update.message.reply_text("User muted")
-
-async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = None
-
-    if update.message.reply_to_message:
-        uid = update.message.reply_to_message.from_user.id
-    elif context.args:
-        uid, _ = find_user(" ".join(context.args))
-
-    if not uid:
-        return await update.message.reply_text("User not found")
-
-    muted_users.discard(uid)
-    await update.message.reply_text("User unmuted")
-
-# ======================
-# SEARCH (ADVANCED)
-# ======================
-
+# ===== SEARCH =====
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
 
     try:
-        results = wikipedia.search(query)
+        results = wikipedia.search(query, results=5)
 
         if not results:
-            return await update.message.reply_text("No results found")
+            await update.message.reply_text("No results")
+            return
 
-        search_cache[update.effective_user.id] = results[:5]
+        key = (update.effective_chat.id, update.effective_user.id)
+        search_cache[key] = results
 
-        msg = "🔎 Multiple results:\n"
-        for i, r in enumerate(results[:5], 1):
+        msg = "🔎 Results:\n"
+        for i, r in enumerate(results, 1):
             msg += f"{i}. {r}\n"
 
         msg += "\nUse: /choose 1"
         await update.message.reply_text(msg)
 
-    except Exception as e:
-        await update.message.reply_text("Search error")
+    except:
+        await update.message.reply_text("Search failed, try different word")
 
+# ===== CHOOSE =====
 async def choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key = (update.effective_chat.id, update.effective_user.id)
+
+    if key not in search_cache:
+        await update.message.reply_text("Search first")
+        return
+
     try:
         index = int(context.args[0]) - 1
-        results = search_cache.get(update.effective_user.id)
+        title = search_cache[key][index]
 
-        if not results:
-            return await update.message.reply_text("Search expired")
-
-        title = results[index]
         summary = wikipedia.summary(title, sentences=5)
 
         await update.message.reply_text(f"📖 {title}\n\n{summary}")
@@ -225,70 +149,44 @@ async def choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("Invalid choice")
 
-# ======================
-# PANEL
-# ======================
-
+# ===== PANEL =====
 async def panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("Status", callback_data="status")],
-        [InlineKeyboardButton("Warnings", callback_data="warnings")],
+        [InlineKeyboardButton("User Info", callback_data="x")],
+        [InlineKeyboardButton("Search", callback_data="x")],
+        [InlineKeyboardButton("Health", callback_data="x")]
     ]
+    await update.message.reply_text("Admin Panel", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    await update.message.reply_text(
-        "Admin Panel",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+# ===== HEALTH =====
+start_time = time.time()
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uptime = int(time.time() - start_time)
+    await update.message.reply_text(f"Bot running\nUptime: {uptime}s")
 
-    if query.data == "status":
-        uptime = int(time.time() - start_time)
-        await query.edit_message_text(f"Uptime: {uptime}s")
+# ===== ERROR =====
+async def error_handler(update, context):
+    print(context.error)
 
-# ======================
-# HANDLE MESSAGE
-# ======================
-
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    save_user(user)
-
-    text = update.message.text
-
-    if user.id in muted_users:
-        await update.message.delete()
-        return
-
-    if URL_PATTERN.search(text):
-        await update.message.delete()
-        await log_private(context, f"🚨 Link removed: {text}")
-
-# ======================
-# MAIN
-# ======================
-
+# ===== MAIN =====
 def main():
     keep_alive()
 
     app = ApplicationBuilder().token(TOKEN).build()
 
+    app.add_error_handler(error_handler)
+
+    app.add_handler(MessageHandler(filters.ALL, track_users))
+
     app.add_handler(CommandHandler("userinfo", userinfo))
     app.add_handler(CommandHandler("searchuser", searchuser))
-    app.add_handler(CommandHandler("mute", mute))
-    app.add_handler(CommandHandler("unmute", unmute))
     app.add_handler(CommandHandler("search", search))
     app.add_handler(CommandHandler("choose", choose))
     app.add_handler(CommandHandler("panel", panel))
+    app.add_handler(CommandHandler("health", health))
 
-    app.add_handler(CallbackQueryHandler(button_handler))
-
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-
-    print("Bot running...")
+    print("Bot started")
     app.run_polling()
 
 if __name__ == "__main__":
