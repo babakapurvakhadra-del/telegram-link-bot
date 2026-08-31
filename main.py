@@ -1,80 +1,65 @@
 import os
-import json
 import logging
 import requests
 import wikipedia
+from flask import Flask
+from threading import Thread
 
-from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-# ================== CONFIG ==================
-TOKEN = os.getenv("BOT_TOKEN")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+# ---------------- CONFIG ----------------
+TOKEN = os.getenv("TOKEN")
+SERP_API_KEY = os.getenv("SERPAPI_KEY")
 
 logging.basicConfig(level=logging.INFO)
 
-# ================== DATABASE ==================
-DB_FILE = "data.json"
+# ---------------- KEEP ALIVE ----------------
+app_web = Flask(__name__)
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
-    return {"warnings": {}, "blocked_domains": []}
+@app_web.route("/")
+def home():
+    return "Bot is alive", 200
 
-def save_db():
-    with open(DB_FILE, "w") as f:
-        json.dump(db, f)
+@app_web.route("/health")
+def health():
+    return "OK", 200
 
-db = load_db()
+def run_web():
+    app_web.run(host="0.0.0.0", port=8080)
 
-def get_warning(chat_id, user_id):
-    return db["warnings"].get(f"{chat_id}_{user_id}", 0)
+def keep_alive():
+    t = Thread(target=run_web)
+    t.start()
 
-def add_warning(chat_id, user_id):
-    key = f"{chat_id}_{user_id}"
-    db["warnings"][key] = db["warnings"].get(key, 0) + 1
-    save_db()
-    return db["warnings"][key]
-
-# ================== INLINE PANEL ==================
-def main_menu():
-    keyboard = [
-        [
-            InlineKeyboardButton("🔍 Search", callback_data="search"),
-            InlineKeyboardButton("👤 User Info", callback_data="userinfo"),
-        ],
-        [
-            InlineKeyboardButton("🔇 Mute", callback_data="mute"),
-            InlineKeyboardButton("🔊 Unmute", callback_data="unmute"),
-        ],
-        [
-            InlineKeyboardButton("🌐 Domains", callback_data="domains"),
-            InlineKeyboardButton("❤️ Health", callback_data="health"),
-        ],
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# ================== COMMANDS ==================
+# ---------------- COMMANDS ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🔍 Search", callback_data="search")],
+        [InlineKeyboardButton("👤 User Info", callback_data="userinfo")],
+        [InlineKeyboardButton("🛡 Domains", callback_data="domains")],
+        [InlineKeyboardButton("❤️ Health", callback_data="health")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        "🤖 Bot Ready\nUse buttons below:",
-        reply_markup=main_menu()
+        "🤖 *Admin Panel*\nClick buttons below:",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
 
-async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Bot is running perfectly")
 
-# ================== SEARCH ==================
+# ---------------- SEARCH ----------------
+
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /search keyword")
@@ -82,21 +67,15 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = " ".join(context.args)
 
-    # Google search (SerpAPI)
+    # Google search via SERP API
     try:
-        url = "https://serpapi.com/search"
-        params = {
-            "q": query,
-            "api_key": SERPAPI_KEY,
-            "engine": "google"
-        }
-        res = requests.get(url, params=params).json()
+        url = f"https://serpapi.com/search.json?q={query}&api_key={SERP_API_KEY}"
+        res = requests.get(url).json()
 
         if "organic_results" in res:
-            result = res["organic_results"][0]
-            await update.message.reply_text(
-                f"🔍 {result['title']}\n{result['link']}"
-            )
+            first = res["organic_results"][0]
+            msg = f"🔎 *Google Result*\n{first['title']}\n{first['link']}"
+            await update.message.reply_text(msg, parse_mode="Markdown")
             return
     except:
         pass
@@ -104,117 +83,56 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Wikipedia fallback
     try:
         summary = wikipedia.summary(query, sentences=2)
-        await update.message.reply_text(summary)
+        await update.message.reply_text(f"📚 {summary}")
     except:
-        await update.message.reply_text("❌ No results found")
+        await update.message.reply_text("❌ No result found")
 
-# ================== USER INFO ==================
+# ---------------- USER INFO ----------------
+
 async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply to a user")
-        return
+    user = update.message.reply_to_message.from_user if update.message.reply_to_message else update.message.from_user
 
-    user = update.message.reply_to_message.from_user
-    await update.message.reply_text(
-        f"👤 Name: {user.first_name}\nID: {user.id}"
-    )
+    text = f"""
+👤 Name: {user.first_name}
+🆔 ID: {user.id}
+🔗 Username: @{user.username if user.username else "N/A"}
+"""
+    await update.message.reply_text(text)
 
-# ================== MUTE ==================
-async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply to user to mute")
-        return
+# ---------------- LINK FILTER ----------------
 
-    user_id = update.message.reply_to_message.from_user.id
-    await context.bot.restrict_chat_member(
-        update.effective_chat.id,
-        user_id,
-        permissions={}
-    )
-    await update.message.reply_text("🔇 User muted")
+BLOCKED = ["http", "https", ".com"]
 
-async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply to user to unmute")
-        return
-
-    user_id = update.message.reply_to_message.from_user.id
-    await context.bot.restrict_chat_member(
-        update.effective_chat.id,
-        user_id,
-        permissions={
-            "can_send_messages": True
-        }
-    )
-    await update.message.reply_text("🔊 User unmuted")
-
-# ================== LINK FILTER ==================
 async def filter_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    text = update.message.text.lower()
 
-    if "http" in text:
-        await update.message.delete()
+    if any(word in text for word in BLOCKED):
+        try:
+            await update.message.delete()
+        except:
+            pass
 
-        user = update.message.from_user
-        chat_id = update.effective_chat.id
+# ---------------- MAIN ----------------
 
-        count = add_warning(chat_id, user.id)
-
-        await context.bot.send_message(
-            chat_id,
-            f"⚠️ {user.first_name} warning {count}/3"
-        )
-
-# ================== CALLBACK ==================
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "health":
-        await query.edit_message_text("✅ Bot is healthy")
-
-    elif query.data == "search":
-        await query.edit_message_text("Use /search keyword")
-
-    elif query.data == "userinfo":
-        await query.edit_message_text("Reply to user then use /userinfo")
-
-    elif query.data == "mute":
-        await query.edit_message_text("Reply to user then use /mute")
-
-    elif query.data == "unmute":
-        await query.edit_message_text("Reply to user then use /unmute")
-
-    elif query.data == "domains":
-        await query.edit_message_text("Domain system active")
-
-# ================== ERROR ==================
-async def error_handler(update, context):
-    print("ERROR:", context.error)
-
-# ================== MAIN ==================
 def main():
+    if not TOKEN:
+        print("❌ TOKEN missing")
+        return
+
+    keep_alive()
+
     app = ApplicationBuilder().token(TOKEN).build()
 
     # Commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("health", health))
     app.add_handler(CommandHandler("search", search))
+    app.add_handler(CommandHandler("health", health_cmd))
     app.add_handler(CommandHandler("userinfo", userinfo))
-    app.add_handler(CommandHandler("mute", mute))
-    app.add_handler(CommandHandler("unmute", unmute))
 
-    # Buttons
-    app.add_handler(CallbackQueryHandler(button_click))
+    # Message filter
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), filter_links))
 
-    # Messages
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, filter_links))
-
-    # Error
-    app.add_error_handler(error_handler)
-
-    print("Bot started")
-
+    print("✅ Bot started...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
