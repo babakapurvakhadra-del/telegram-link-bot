@@ -2,242 +2,214 @@ import os
 import logging
 import sqlite3
 import requests
+import wikipedia
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from functools import wraps
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
+
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
-    filters,
+    filters
 )
 
-# ----------------- SAFE TOKEN LOAD -----------------
+# ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
 if not TOKEN:
-    raise Exception("❌ TELEGRAM_BOT_TOKEN missing in environment variables")
+    raise Exception("❌ TELEGRAM_BOT_TOKEN missing")
 
-# ----------------- LOGGING -----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ----------------- DB (NO RESET) -----------------
+# ================= DATABASE =================
 conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
+cur = conn.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    first_name TEXT
-)
-""")
+cur.execute("""CREATE TABLE IF NOT EXISTS muted_users(
+    chat_id INTEGER,
+    user_id INTEGER
+)""")
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS banned_domains (
-    domain TEXT PRIMARY KEY
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS muted_users (
-    user_id INTEGER PRIMARY KEY
-)
-""")
+cur.execute("""CREATE TABLE IF NOT EXISTS blocked_domains(
+    domain TEXT
+)""")
 
 conn.commit()
 
-# ----------------- FLASK HEALTH -----------------
+# ================= FLASK =================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot is running"
+    return "Bot is alive"
 
 @app.route("/health")
 def health():
     return {"status": "ok"}
 
-# ----------------- HELPERS -----------------
-def save_user(user):
-    cursor.execute(
-        "INSERT OR REPLACE INTO users VALUES (?, ?, ?)",
-        (user.id, user.username, user.first_name),
-    )
-    conn.commit()
+# ================= HELPERS =================
+def safe(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            return await func(update, context)
+        except Exception as e:
+            logger.error(f"Error: {e}")
+    return wrapper
 
 
-def get_user_from_anywhere(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resolve user from reply, username, id, mention"""
+def resolve_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Works for:
+    - reply
+    - username
+    - user_id
+    """
     msg = update.message
 
-    # 1. reply
     if msg.reply_to_message:
         return msg.reply_to_message.from_user
 
-    # 2. argument
     if context.args:
         arg = context.args[0]
 
         if arg.startswith("@"):
-            return arg[1:]  # username
+            for u in msg.chat.get_administrators():
+                if u.user.username == arg[1:]:
+                    return u.user
 
-        if arg.isdigit():
-            return int(arg)
+        try:
+            return msg.chat.get_member(int(arg)).user
+        except:
+            pass
 
     return msg.from_user
 
 
-# ----------------- INLINE ADMIN PANEL -----------------
+# ================= INLINE PANEL =================
 def admin_panel():
     return InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("👤 User Info", callback_data="userinfo"),
             InlineKeyboardButton("🔇 Mute", callback_data="mute"),
+        ],
+        [
             InlineKeyboardButton("🔊 Unmute", callback_data="unmute"),
+            InlineKeyboardButton("🌐 Allow Domain", callback_data="allow"),
         ],
         [
             InlineKeyboardButton("🚫 Block Domain", callback_data="block"),
-            InlineKeyboardButton("✅ Allow Domain", callback_data="allow"),
+            InlineKeyboardButton("📋 List Domains", callback_data="list"),
         ],
         [
-            InlineKeyboardButton("👤 User Info", callback_data="userinfo"),
-            InlineKeyboardButton("🔎 Search User", callback_data="searchuser"),
-        ],
-        [
-            InlineKeyboardButton("📊 Moderation", callback_data="moderate"),
+            InlineKeyboardButton("🔍 Search", callback_data="search"),
+            InlineKeyboardButton("🆔 Get ID", callback_data="id"),
         ]
     ])
 
 
-# ----------------- COMMANDS -----------------
+# ================= COMMANDS =================
+@safe
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bot Started ✅",
+        "🤖 Admin Panel",
         reply_markup=admin_panel()
     )
 
 
-# ----------------- MUTE / UNMUTE -----------------
+@safe
 async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = get_user_from_anywhere(update, context)
+    user = resolve_user(update, context)
 
-    try:
-        await context.bot.restrict_chat_member(
-            update.effective_chat.id,
-            user.id,
-            permissions={"can_send_messages": False},
-        )
-        cursor.execute("INSERT OR REPLACE INTO muted_users VALUES (?)", (user.id,))
-        conn.commit()
+    cur.execute("INSERT INTO muted_users VALUES (?,?)",
+                (update.effective_chat.id, user.id))
+    conn.commit()
 
-        await update.message.reply_text(f"🔇 Muted {user.id}")
-
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    await update.message.reply_text(f"🔇 Muted {user.full_name}")
 
 
+@safe
 async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = get_user_from_anywhere(update, context)
+    user = resolve_user(update, context)
 
-    try:
-        await context.bot.restrict_chat_member(
-            update.effective_chat.id,
-            user.id,
-            permissions={"can_send_messages": True},
-        )
+    cur.execute("DELETE FROM muted_users WHERE chat_id=? AND user_id=?",
+                (update.effective_chat.id, user.id))
+    conn.commit()
 
-        cursor.execute("DELETE FROM muted_users WHERE user_id=?", (user.id,))
-        conn.commit()
-
-        await update.message.reply_text(f"🔊 Unmuted {user.id}")
-
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    await update.message.reply_text(f"🔊 Unmuted {user.full_name}")
 
 
-# ----------------- USER INFO (FOR ANY USER) -----------------
+@safe
 async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = get_user_from_anywhere(update, context)
+    user = resolve_user(update, context)
 
-    try:
-        member = await context.bot.get_chat_member(
-            update.effective_chat.id,
-            user.id
-        )
-
-        text = f"""
+    text = f"""
 👤 User Info
 ID: {user.id}
-Name: {user.first_name}
-Username: @{user.username}
-Status: {member.status}
+Name: {user.full_name}
+Username: @{user.username if user.username else 'N/A'}
 """
-        await update.message.reply_text(text)
 
-    except Exception as e:
-        await update.message.reply_text(f"User info error: {e}")
+    await update.message.reply_text(text)
 
 
-# ----------------- SERPAPI GOOGLE SEARCH -----------------
+@safe
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
+    q = " ".join(context.args)
 
-    if not query:
-        return await update.message.reply_text("Send query")
+    if SERPAPI_KEY:
+        url = "https://serpapi.com/search"
+        res = requests.get(url, params={
+            "q": q,
+            "api_key": SERPAPI_KEY
+        }).json()
 
-    url = "https://serpapi.com/search"
-    params = {
-        "q": query,
-        "api_key": SERPAPI_KEY
-    }
+        if "organic_results" in res:
+            top = res["organic_results"][0]
+            await update.message.reply_text(top.get("title", "") + "\n" + top.get("link", ""))
+            return
 
-    res = requests.get(url, params=params).json()
-
+    # fallback wikipedia
     try:
-        results = res.get("organic_results", [])[:3]
-        text = "\n\n".join([r["title"] + "\n" + r.get("link", "") for r in results])
-        await update.message.reply_text(text)
+        await update.message.reply_text(wikipedia.summary(q, sentences=2))
     except:
-        await update.message.reply_text("No results")
+        await update.message.reply_text("No results found")
 
 
-# ----------------- CALLBACK HANDLER -----------------
+# ================= CALLBACK HANDLER =================
+@safe
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+    query = update.callback_query
+    await query.answer()
 
-    action = q.data
+    data = query.data
 
-    if action == "mute":
-        await q.message.reply_text("Reply or use /mute @user")
+    if data == "userinfo":
+        await query.message.reply_text("Reply with /userinfo @user or reply message")
 
-    elif action == "unmute":
-        await q.message.reply_text("Reply or use /unmute @user")
+    elif data == "mute":
+        await query.message.reply_text("Reply with /mute @user")
 
-    elif action == "userinfo":
-        await q.message.reply_text("Reply or /userinfo @user")
+    elif data == "unmute":
+        await query.message.reply_text("Reply with /unmute @user")
 
-    elif action == "moderate":
-        await q.message.reply_text("Moderation panel ready")
+    elif data == "search":
+        await query.message.reply_text("Use /search query")
 
 
-# ----------------- BOT SETUP -----------------
+# ================= MAIN =================
 def main():
     app_bot = ApplicationBuilder().token(TOKEN).build()
 
-    # commands (BotFather style menu)
-    app_bot.bot.set_my_commands([
-        BotCommand("start", "Start bot"),
-        BotCommand("mute", "Mute user"),
-        BotCommand("unmute", "Unmute user"),
-        BotCommand("userinfo", "User info"),
-        BotCommand("search", "Google search"),
-    ])
-
-    # handlers
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("mute", mute))
     app_bot.add_handler(CommandHandler("unmute", unmute))
@@ -246,10 +218,11 @@ def main():
 
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
-    # start bot
-    app_bot.run_polling(drop_pending_updates=True)
+    app_bot.run_polling()
 
-
-# ----------------- RUN -----------------
+# Flask + bot run
 if __name__ == "__main__":
+    from threading import Thread
+
+    Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
     main()
