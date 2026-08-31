@@ -1,12 +1,12 @@
-# main.py (full updated version)
+# main.py (FINAL)
 import os
 import time
 import logging
 import sqlite3
-import wikipedia
 import re
 import requests
-from urllib.parse import urlparse, quote_plus
+import wikipedia
+from urllib.parse import urlparse
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,107 +20,48 @@ from telegram.ext import (
 
 from keep_alive import keep_alive
 
-# ===== CONFIG =====
+# -------- CONFIG --------
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-LOG_CHAT_ID = int(os.getenv("LOG_CHAT_ID"))
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-
+LOG_CHAT_ID = int(os.getenv("LOG_CHAT_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 ADMINS = {ADMIN_ID}
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", None)
+
 logging.basicConfig(level=logging.INFO)
 start_time = time.time()
 
-# Optional SerpAPI key (for Google-like results). If not set, SerpAPI path is skipped.
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-
-# ===== DB (persistent) =====
+# -------- DB (SQLite persisted in container) --------
 DB_PATH = "bot.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = conn.cursor()
 
-# create tables if missing
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
+# create tables
+cur.execute("""CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
     username TEXT,
     language TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS warnings (
+)""")
+cur.execute("""CREATE TABLE IF NOT EXISTS warnings (
     chat_id INTEGER,
     user_id INTEGER,
     count INTEGER,
     PRIMARY KEY (chat_id, user_id)
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS muted (
+)""")
+cur.execute("""CREATE TABLE IF NOT EXISTS muted (
     chat_id INTEGER,
     user_id INTEGER,
     PRIMARY KEY (chat_id, user_id)
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS allowed_domains (
-    domain TEXT PRIMARY KEY
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS blocked_domains (
-    domain TEXT PRIMARY KEY
-)
-""")
-
+)""")
+cur.execute("""CREATE TABLE IF NOT EXISTS allowed_domains (domain TEXT PRIMARY KEY)""")
+cur.execute("""CREATE TABLE IF NOT EXISTS blocked_domains (domain TEXT PRIMARY KEY)""")
 conn.commit()
 
-# ===== In-memory session storage =====
-search_cache = {}  # key: (chat_id, user_id) -> list of wiki titles
+# -------- in-memory search cache for choose flow --------
+search_cache = {}  # key: (chat_id, user_id) -> list[str]
 
-# url detection
+# -------- helpers & patterns --------
 URL_PATTERN = re.compile(r"(https?://\S+|www\.\S+)")
-
-# ===== Helpers =====
-def save_user_to_db(user):
-    if not user:
-        return
-    try:
-        cur.execute(
-            "INSERT OR REPLACE INTO users (user_id, name, username, language) VALUES (?, ?, ?, ?)",
-            (user.id, user.full_name, user.username, user.language_code),
-        )
-        conn.commit()
-    except Exception as e:
-        logging.error("DB save user failed: %s", e)
-
-def find_user_in_db_by_query(query):
-    q = query.strip()
-    if q.isdigit():
-        cur.execute("SELECT user_id, name, username, language FROM users WHERE user_id = ?", (int(q),))
-        r = cur.fetchone()
-        if r:
-            return r
-    if q.startswith("@"):
-        username = q[1:]
-        cur.execute("SELECT user_id, name, username, language FROM users WHERE username = ?", (username,))
-        r = cur.fetchone()
-        if r:
-            return r
-    cur.execute("SELECT user_id, name, username, language FROM users WHERE lower(name) LIKE ?", (f"%{q.lower()}%",))
-    r = cur.fetchone()
-    if r:
-        return r
-    return None
-
-async def send_private_log(context: ContextTypes.DEFAULT_TYPE, text: str):
-    try:
-        await context.bot.send_message(chat_id=LOG_CHAT_ID, text=text)
-    except Exception as e:
-        logging.error("Failed to send private log: %s", e)
 
 def normalize_domain(netloc: str) -> str:
     if not netloc:
@@ -130,19 +71,44 @@ def normalize_domain(netloc: str) -> str:
         d = d[4:]
     return d
 
-def is_domain_allowed(domain: str) -> bool:
-    cur.execute("SELECT 1 FROM allowed_domains WHERE domain = ?", (domain,))
-    return cur.fetchone() is not None
+def save_user_to_db(user):
+    if not user:
+        return
+    try:
+        cur.execute(
+            "INSERT OR REPLACE INTO users (user_id, name, username, language) VALUES (?, ?, ?, ?)",
+            (user.id, user.full_name, user.username, user.language_code),
+        )
+        conn.commit()
+    except Exception:
+        logging.exception("save_user_to_db failed")
 
-def is_domain_blocked(domain: str) -> bool:
-    cur.execute("SELECT 1 FROM blocked_domains WHERE domain = ?", (domain,))
-    return cur.fetchone() is not None
+def find_user_in_db_by_query(query):
+    q = query.strip()
+    if q.startswith("@"):
+        q = q[1:]
+        cur.execute("SELECT user_id, name, username, language FROM users WHERE username = ?", (q,))
+        r = cur.fetchone()
+        if r:
+            return r
+    if q.isdigit():
+        cur.execute("SELECT user_id, name, username, language FROM users WHERE user_id = ?", (int(q),))
+        r = cur.fetchone()
+        if r:
+            return r
+    cur.execute("SELECT user_id, name, username, language FROM users WHERE lower(name) LIKE ?", (f"%{q.lower()}%",))
+    r = cur.fetchone()
+    if r:
+        return r
+    return None
 
-def add_allowed_domain(domain: str):
+def add_allowed_domain(domain):
+    domain = normalize_domain(domain)
     cur.execute("INSERT OR IGNORE INTO allowed_domains (domain) VALUES (?)", (domain,))
     conn.commit()
 
-def add_blocked_domain(domain: str):
+def add_blocked_domain(domain):
+    domain = normalize_domain(domain)
     cur.execute("INSERT OR IGNORE INTO blocked_domains (domain) VALUES (?)", (domain,))
     conn.commit()
 
@@ -153,131 +119,191 @@ def list_domains():
     blocked = [r[0] for r in cur.fetchall()]
     return allowed, blocked
 
-def get_warning_count(chat_id: int, user_id: int):
+# warnings/muted DB (per-chat)
+def get_warning_count(chat_id:int, user_id:int)->int:
     cur.execute("SELECT count FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id))
-    row = cur.fetchone()
-    return row[0] if row else 0
+    r = cur.fetchone()
+    return r[0] if r else 0
 
-def set_warning_count(chat_id: int, user_id: int, count: int):
+def set_warning_count(chat_id:int, user_id:int, count:int):
     cur.execute("REPLACE INTO warnings (chat_id, user_id, count) VALUES (?, ?, ?)", (chat_id, user_id, count))
     conn.commit()
 
-def reset_warnings(chat_id: int, user_id: int):
+def reset_warnings(chat_id:int, user_id:int):
     cur.execute("DELETE FROM warnings WHERE chat_id=? AND user_id=?", (chat_id, user_id))
     conn.commit()
 
-def mute_db(chat_id: int, user_id: int):
+def mute_db(chat_id:int, user_id:int):
     cur.execute("REPLACE INTO muted (chat_id, user_id) VALUES (?, ?)", (chat_id, user_id))
     conn.commit()
 
-def unmute_db(chat_id: int, user_id: int):
+def unmute_db(chat_id:int, user_id:int):
     cur.execute("DELETE FROM muted WHERE chat_id=? AND user_id=?", (chat_id, user_id))
     conn.commit()
 
-def is_muted_db(chat_id: int, user_id: int):
+def is_muted_db(chat_id:int, user_id:int)->bool:
     cur.execute("SELECT 1 FROM muted WHERE chat_id=? AND user_id=?", (chat_id, user_id))
     return cur.fetchone() is not None
 
-def muted_list_for_chat(chat_id: int):
+def muted_list_for_chat(chat_id:int):
     cur.execute("SELECT user_id FROM muted WHERE chat_id=?", (chat_id,))
     return [r[0] for r in cur.fetchall()]
 
-# ===== Utility to find target user id from args or reply (now async) =====
+# private log sender
+async def send_private_log(context: ContextTypes.DEFAULT_TYPE, text: str):
+    try:
+        if LOG_CHAT_ID == 0:
+            logging.warning("LOG_CHAT_ID not set - private logs disabled")
+            return
+        await context.bot.send_message(chat_id=LOG_CHAT_ID, text=text)
+    except Exception:
+        logging.exception("send_private_log failed")
+
+# robust target resolver
 async def parse_target_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Return tuple (target_id, display_string) or (None, None)
+    """
+    Returns (target_id:int, display:str) or (None, None).
+    Order:
+     1) reply -> replied user
+     2) tg://user?id=123
+     3) numeric id -> attempt get_chat_member if in chat
+     4) @username -> try DB -> get_chat (public username) -> then get_chat_member(chat_id, id) to confirm presence in current chat
+     5) plain name -> DB search
+    Note: Telegram API doesn't allow searching all chat members by name; DB or reply is the reliable way.
+    """
+    # (1) reply
     if update.message and update.message.reply_to_message:
         u = update.message.reply_to_message.from_user
         return u.id, f"{u.full_name} (@{u.username if u.username else 'none'})"
 
+    # (2) args given
     if context.args:
         raw = " ".join(context.args).strip()
 
-        # tg://user?id=12345
         if raw.startswith("tg://user?id="):
             try:
-                uid = int(raw.split("=")[1])
+                uid = int(raw.split("=",1)[1])
                 return uid, f"id:{uid}"
             except:
                 return None, None
 
-        # numeric id
         if raw.isdigit():
-            return int(raw), f"id:{raw}"
+            uid = int(raw)
+            # try to validate presence in chat
+            try:
+                if update.effective_chat:
+                    await context.bot.get_chat_member(update.effective_chat.id, uid)
+                    return uid, f"id:{uid}"
+                return uid, f"id:{uid}"
+            except Exception:
+                # not member or API blocked, still return id
+                return uid, f"id:{uid}"
 
-        # @username -> try DB, else try get_chat(@username)
         if raw.startswith("@"):
-            # try DB first
-            r = find_user_in_db_by_query(raw)
-            if r:
-                return r[0], f"{r[1]} (@{r[2] if r[2] else 'none'})"
-            # fallback: ask Telegram for the chat for that username
+            db_res = find_user_in_db_by_query(raw)
+            if db_res:
+                return db_res[0], f"{db_res[1]} (@{db_res[2] if db_res[2] else 'none'})"
+            # fallback to get_chat (public username)
             try:
                 chat = await context.bot.get_chat(raw)
-                # chat.id is numeric user id for a user
-                return chat.id, f"{chat.full_name if hasattr(chat, 'full_name') else raw} (@{chat.username if getattr(chat, 'username', None) else raw})"
+                # Validate if they are member in this chat
+                uid = chat.id
+                if update.effective_chat:
+                    try:
+                        await context.bot.get_chat_member(update.effective_chat.id, uid)
+                        return uid, f"{getattr(chat,'full_name', raw)} (@{getattr(chat,'username', None)})"
+                    except Exception:
+                        # user exists but may not be member of this chat
+                        return uid, f"{getattr(chat,'full_name', raw)} (@{getattr(chat,'username', None)})"
+                return uid, f"{getattr(chat,'full_name', raw)} (@{getattr(chat,'username', None)})"
             except Exception:
                 return None, None
 
-        # plain name or username without @ -> try DB
-        r = find_user_in_db_by_query(raw)
-        if r:
-            return r[0], f"{r[1]} (@{r[2] if r[2] else 'none'})"
+        # plain name -> DB search
+        db_res = find_user_in_db_by_query(raw)
+        if db_res:
+            return db_res[0], f"{db_res[1]} (@{db_res[2] if db_res[2] else 'none'})"
 
     return None, None
 
-# ===== Track/save users =====
+# track users helper
 async def track_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user:
         save_user_to_db(update.effective_user)
 
-# ===== New member logging =====
+# new member handler
 async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for user in update.message.new_chat_members:
         save_user_to_db(user)
-        text = (
+        txt = (
             f"👤 NEW MEMBER\n"
             f"Name: {user.full_name}\n"
             f"Username: @{user.username if user.username else 'None'}\n"
             f"User ID: {user.id}\n"
             f"Language: {user.language_code}"
         )
-        await send_private_log(context, text)
+        await send_private_log(context, txt)
 
-# ===== Userinfo/searchuser =====
-async def userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message:
-        target = update.message.reply_to_message.from_user
-        save_user_to_db(target)
-        row = (target.id, target.full_name, target.username, target.language_code)
+# userinfo
+async def userinfo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # reply => info of replied user
+    if update.message and update.message.reply_to_message:
+        tgt = update.message.reply_to_message.from_user
+        save_user_to_db(tgt)
+        row = (tgt.id, tgt.full_name, tgt.username, tgt.language_code)
     elif context.args:
         q = " ".join(context.args)
         row = find_user_in_db_by_query(q)
+        # fallback: @username => get_chat
+        if not row and q.startswith("@"):
+            try:
+                chat = await context.bot.get_chat(q)
+                row = (chat.id, getattr(chat, "full_name", q), getattr(chat, "username", None), getattr(chat, "language_code", None))
+            except Exception:
+                row = None
     else:
-        await update.message.reply_text("Reply to a user or use /userinfo @username or /userinfo <id> or /userinfo <partial name>")
+        await update.message.reply_text("Usage: reply to user or /userinfo <@username|id|partial name>")
         return
 
     if not row:
-        await update.message.reply_text("User not found in DB. They must interact once or be replied-to so bot can save them.")
+        await update.message.reply_text("User not found in DB or via Telegram API.")
         return
 
-    user_id, name, username, lang = row
-    text = f"📌 USER INFO\nName: {name}\nUsername: @{username if username else 'None'}\nUser ID: {user_id}\nLanguage: {lang}"
+    uid, name, username, lang = row
+    text = f"📌 USER INFO\nName: {name}\nUsername: @{username if username else 'None'}\nUser ID: {uid}\nLanguage: {lang}"
     await send_private_log(context, text)
     await update.message.reply_text("User info sent to private log")
 
-async def searchuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# searchuser quick DB lookup
+async def searchuser_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /searchuser <name|@username|id>")
+        await update.message.reply_text("Usage: /searchuser <@username|id|partial name>")
         return
     q = " ".join(context.args)
     row = find_user_in_db_by_query(q)
     if not row:
         await update.message.reply_text("User not found in DB.")
         return
-    user_id, name, username, _ = row
+    user_id, name, username, lang = row
     await update.message.reply_text(f"Found: {name} (@{username if username else 'None'}) — ID: {user_id}")
 
-# ===== SEARCH + CHOOSE with fallback (wikipedia → duckduckgo → serpapi optional) =====
+# getid command — returns user id for member in same chat (best-effort)
+async def getid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # if reply
+    if update.message and update.message.reply_to_message:
+        u = update.message.reply_to_message.from_user
+        await update.message.reply_text(f"User ID: {u.id}")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: reply to user or /getid <@username|id|tg://user?id=...>")
+        return
+    target_id, desc = await parse_target_id(update, context)
+    if not target_id:
+        await update.message.reply_text("Could not resolve user. Use reply, @username, tg://user?id or numeric id.")
+        return
+    await update.message.reply_text(f"Resolved: {desc} — ID: {target_id}")
+
+# SEARCH /choose — Wiki -> DDG -> SerpAPI fallback
 async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip()
     if not query:
@@ -285,58 +311,51 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     results = []
-
-    # 1) Try wikipedia.search()
+    # try Wikipedia
     try:
-        for attempt in range(2):
-            try:
-                results = wikipedia.search(query, results=7)
-                break
-            except Exception:
-                logging.exception("wikipedia.search attempt failed")
-                time.sleep(0.3)
+        results = wikipedia.search(query, results=8)
     except Exception:
-        logging.exception("wikipedia.search top-level failed")
+        logging.exception("wikipedia.search failed")
 
-    # 2) If no results, try DuckDuckGo instant answer/opensearch
+    # DuckDuckGo fallback
     if not results:
         try:
-            ddg_url = "https://api.duckduckgo.com/"
-            params = {"q": query, "format": "json", "no_redirect": 1, "no_html": 1}
-            r = requests.get(ddg_url, params=params, timeout=6)
+            r = requests.get("https://api.duckduckgo.com/", params={"q": query, "format": "json", "no_html": 1, "no_redirect": 1}, timeout=6)
             if r.status_code == 200:
                 data = r.json()
-                # first try AbstractText or RelatedTopics titles
-                if data.get("AbstractText"):
-                    results = [data.get("Heading", query)]
+                if data.get("Heading"):
+                    results = [data.get("Heading")]
                 else:
                     related = data.get("RelatedTopics", [])
                     titles = []
                     for it in related:
-                        if isinstance(it, dict) and it.get("Text"):
-                            titles.append(it.get("Text").split(" - ")[0])
-                        if len(titles) >= 7:
-                            break
+                        if isinstance(it, dict):
+                            t = it.get("Text")
+                            if t:
+                                titles.append(t.split(" - ")[0])
+                            if len(titles) >= 8:
+                                break
                     results = titles
         except Exception:
-            logging.exception("DuckDuckGo fallback failed")
+            logging.exception("DDG fallback failed")
 
-    # 3) Optional: SerpAPI (Google) if key provided — richer web results
+    # SerpAPI fallback (if key provided)
     if not results and SERPAPI_KEY:
         try:
-            serp_url = "https://serpapi.com/search.json"
-            params = {"q": query, "engine": "google", "api_key": SERPAPI_KEY, "num": 7}
-            r = requests.get(serp_url, params=params, timeout=6)
+            r = requests.get("https://serpapi.com/search.json", params={"q": query, "engine": "google", "api_key": SERPAPI_KEY, "num": 8}, timeout=6)
             if r.status_code == 200:
                 data = r.json()
-                organic = data.get("organic_results", [])
-                titles = [o.get("title')".replace("'", "") if False else o.get("title") for o in organic][:7]
-                # fallback to link or snippet if no title
-                if not titles:
-                    titles = [o.get("snippet","").split("\n")[0] for o in organic][:7]
+                organic = data.get("organic_results", []) or data.get("organic", [])
+                titles = []
+                for o in organic:
+                    title = o.get("title") or o.get("snippet") or o.get("link")
+                    if title:
+                        titles.append(title)
+                    if len(titles) >= 8:
+                        break
                 results = titles
         except Exception:
-            logging.exception("SerpAPI request failed")
+            logging.exception("SerpAPI fallback failed")
 
     if not results:
         await update.message.reply_text("No results found.")
@@ -346,7 +365,7 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     search_cache[key] = results
 
     msg = "🔎 Multiple results:\n\n"
-    for i, r in enumerate(results[:7], 1):
+    for i, r in enumerate(results[:8], 1):
         msg += f"{i}. {r}\n"
     msg += "\nChoose one with: /choose <number>"
     await update.message.reply_text(msg)
@@ -366,9 +385,9 @@ async def choose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Invalid choice number.")
             return
         title = results[idx]
-        # Try wikipedia summary first
+        # try wikipedia summary
         try:
-            summary = wikipedia.summary(title, sentences=8)
+            summary = wikipedia.summary(title, sentences=10)
             await update.message.reply_text(f"📖 {title}\n\n{summary}")
             return
         except wikipedia.DisambiguationError as ex:
@@ -376,272 +395,102 @@ async def choose_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = f"⚠️ Disambiguation for '{title}':\n"
             for i, o in enumerate(options, 1):
                 msg += f"{i}. {o}\n"
-            msg += "\nTry /search with a more specific query or choose one from suggestions."
+            msg += "\nTry /search with a more specific query or re-run /search and /choose."
             await update.message.reply_text(msg)
             return
         except Exception:
-            logging.exception("wikipedia.summary failed — trying API fallback")
-
-        # fallback: Wikipedia API extract
+            logging.exception("wikipedia.summary failed")
+        # fallback: wiki API extract
         try:
-            s_url = "https://en.wikipedia.org/w/api.php"
-            s_params = {"action":"query","prop":"extracts","exintro":True,"explaintext":True,"titles":title,"format":"json","redirects":1}
-            r = requests.get(s_url, params=s_params, timeout=6)
+            r = requests.get("https://en.wikipedia.org/w/api.php",
+                             params={"action": "query", "prop": "extracts", "exintro": True, "explaintext": True, "titles": title, "format": "json", "redirects": 1}, timeout=6)
             if r.status_code == 200:
                 data = r.json()
                 pages = data.get("query", {}).get("pages", {})
-                page = next(iter(pages.values()))
-                extract = page.get("extract", "No extract available.")
-                await update.message.reply_text(f"📖 {title}\n\n{extract}")
-                return
+                if pages:
+                    page = next(iter(pages.values()))
+                    extract = page.get("extract", "No extract available.")
+                    await update.message.reply_text(f"📖 {title}\n\n{extract}")
+                    return
         except Exception:
-            logging.exception("wikipedia API fallback failed")
-
-        # last resort: DuckDuckGo instant answer summary
+            logging.exception("wiki API fallback failed")
+        # final fallback ddg
         try:
-            ddg_url = "https://api.duckduckgo.com/"
-            params = {"q": title, "format": "json", "no_redirect": 1, "no_html": 1}
-            r = requests.get(ddg_url, params=params, timeout=6)
+            r = requests.get("https://api.duckduckgo.com/", params={"q": title, "format": "json", "no_html": 1, "no_redirect": 1}, timeout=6)
             if r.status_code == 200:
                 data = r.json()
                 if data.get("AbstractText"):
                     await update.message.reply_text(f"📖 {title}\n\n{data.get('AbstractText')}")
                     return
         except Exception:
-            logging.exception("DDG fallback failed")
-
+            logging.exception("DDG title fallback failed")
         await update.message.reply_text(f"Could not fetch details for {title}.")
     except ValueError:
         await update.message.reply_text("Invalid number. Use /choose 1")
 
-# ===== Domain commands (allow/block/list) =====
+# allow/block/listdomains
 async def allow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caller = update.effective_user.id
-    if caller not in ADMINS:
+    if update.effective_user.id not in ADMINS:
         await update.message.reply_text("Only admin can change allowed domains.")
         return
     if not context.args:
-        await update.message.reply_text("Usage: /allow <domain>  (example: /allow youtube.com)")
+        await update.message.reply_text("Usage: /allow <domain>")
         return
-    domain = context.args[0].lower().strip()
-    domain = domain.replace("http://", "").replace("https://", "").split("/")[0]
-    if domain.startswith("www."):
-        domain = domain[4:]
-    add_allowed_domain(domain)
-    await update.message.reply_text(f"Allowed domain: {domain}")
+    add_allowed_domain(context.args[0])
+    await update.message.reply_text(f"Allowed: {context.args[0]}")
 
 async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caller = update.effective_user.id
-    if caller not in ADMINS:
+    if update.effective_user.id not in ADMINS:
         await update.message.reply_text("Only admin can block domains.")
         return
     if not context.args:
-        await update.message.reply_text("Usage: /block <domain>  (example: /block scam.com)")
+        await update.message.reply_text("Usage: /block <domain>")
         return
-    domain = context.args[0].lower().strip()
-    domain = domain.replace("http://", "").replace("https://", "").split("/")[0]
-    if domain.startswith("www."):
-        domain = domain[4:]
-    add_blocked_domain(domain)
-    await update.message.reply_text(f"Blocked domain: {domain}")
+    add_blocked_domain(context.args[0])
+    await update.message.reply_text(f"Blocked: {context.args[0]}")
 
 async def listdomains_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     allowed, blocked = list_domains()
-    msg = "Allowed domains:\n" + (", ".join(allowed) if allowed else "— none —")
-    msg += "\n\nBlocked domains:\n" + (", ".join(blocked) if blocked else "— none —")
-    await update.message.reply_text(msg)
+    await update.message.reply_text("Allowed:\n" + (", ".join(allowed) if allowed else "— none —") + "\n\nBlocked:\n" + (", ".join(blocked) if blocked else "— none —"))
 
-# ===== Moderation flow (buttons) =====
-async def moderate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply to a user's message and then run /moderate")
-        return
-    caller_id = update.effective_user.id
-    if caller_id not in ADMINS:
-        await update.message.reply_text("Only admin can use moderation buttons.")
-        return
-    target = update.message.reply_to_message.from_user
-    chat_id = update.effective_chat.id
-    target_id = target.id
-    keyboard = [
-        [
-            InlineKeyboardButton("Mute", callback_data=f"mod:mute:{chat_id}:{target_id}"),
-            InlineKeyboardButton("Unmute", callback_data=f"mod:unmute:{chat_id}:{target_id}")
-        ],
-        [
-            InlineKeyboardButton("Warn +1", callback_data=f"mod:warn:{chat_id}:{target_id}"),
-            InlineKeyboardButton("Reset", callback_data=f"mod:reset:{chat_id}:{target_id}")
-        ],
-        [
-            InlineKeyboardButton("Userinfo (log)", callback_data=f"mod:userinfo:{target_id}")
-        ]
-    ]
-    await update.message.reply_text(
-        f"Moderation for {target.full_name} (@{target.username if target.username else 'none'})",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data or ""
-    caller_id = query.from_user.id
-    if caller_id not in ADMINS:
-        await query.edit_message_text("Only admin may use these buttons.")
-        return
-    parts = data.split(":")
-    if parts[0] != "mod":
-        await query.edit_message_text("Unknown action")
-        return
-    action = parts[1]
-    if action in ("mute", "unmute", "warn", "reset"):
-        if len(parts) < 4:
-            await query.edit_message_text("Bad callback payload.")
-            return
-        chat_id = int(parts[2]); target_id = int(parts[3])
-        if action == "mute":
-            mute_db(chat_id, target_id)
-            await query.edit_message_text("User muted (DB).")
-            await send_private_log(context, f"🔇 Muted {target_id} in {chat_id} by {caller_id}")
-        elif action == "unmute":
-            unmute_db(chat_id, target_id)
-            await query.edit_message_text("User unmuted (DB).")
-            await send_private_log(context, f"🔊 Unmuted {target_id} in {chat_id} by {caller_id}")
-        elif action == "warn":
-            cur_count = get_warning_count(chat_id, target_id)
-            cur_count += 1
-            set_warning_count(chat_id, target_id, cur_count)
-            await query.edit_message_text(f"Warning added. Count = {cur_count}")
-            await send_private_log(context, f"⚠️ Warning for {target_id} in {chat_id}. Now {cur_count}")
-        elif action == "reset":
-            reset_warnings(chat_id, target_id)
-            await query.edit_message_text("Warnings reset.")
-            await send_private_log(context, f"🔁 Warnings reset for {target_id} in {chat_id}")
-    elif action == "userinfo":
-        if len(parts) < 3:
-            await query.edit_message_text("Bad payload")
-            return
-        tid = int(parts[2])
-        cur.execute("SELECT user_id, name, username, language FROM users WHERE user_id=?", (tid,))
-        r = cur.fetchone()
-        if not r:
-            await query.edit_message_text("User not in DB.")
-            return
-        user_id, name, username, lang = r
-        text = f"📌 USER INFO\nName: {name}\nUsername: @{username if username else 'None'}\nID: {user_id}\nLang: {lang}"
-        await send_private_log(context, text)
-        await query.edit_message_text("User info sent to private log")
-    else:
-        await query.edit_message_text("Unknown moderation action")
-
-# ===== Menu / panel =====
-async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Health", callback_data="menu:health")],
-        [InlineKeyboardButton("Search help", callback_data="menu:search")],
-        [InlineKeyboardButton("Moderate (reply)", callback_data="menu:moderate_help")],
-        [InlineKeyboardButton("Panel (admin)", callback_data="menu:panel")],
-        [InlineKeyboardButton("Allowed/Blocked", callback_data="menu:domains")],
-    ]
-    await update.message.reply_text("Bot menu (pin this message for bottom access):", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def menu_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = (q.data or "").split(":")
-    if len(data) < 2:
-        await q.edit_message_text("Unknown menu action")
-        return
-    action = data[1]
-    if action == "health":
-        uptime = int(time.time() - start_time)
-        await q.edit_message_text(f"Bot is alive — uptime {uptime}s")
-    elif action == "search":
-        await q.edit_message_text("Use /search <query> then /choose <number> to pick.")
-    elif action == "moderate_help":
-        await q.edit_message_text("To moderate: reply to a user's message and run /moderate — moderation buttons will appear.")
-    elif action == "panel":
-        await q.edit_message_text("Admin panel is /panel (admin only).")
-    elif action == "domains":
-        allowed, blocked = list_domains()
-        msg = "Allowed domains:\n" + (", ".join(allowed) if allowed else "— none —")
-        msg += "\n\nBlocked domains:\n" + (", ".join(blocked) if blocked else "— none —")
-        await q.edit_message_text(msg)
-    else:
-        await q.edit_message_text("Unknown menu action")
-
-async def panel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caller = update.effective_user.id
-    if caller not in ADMINS:
-        await update.message.reply_text("Only admin can open the panel.")
-        return
-    keyboard = [
-        [InlineKeyboardButton("Health", callback_data="menu:health")],
-        [InlineKeyboardButton("Search help", callback_data="menu:search")],
-        [InlineKeyboardButton("Moderate (reply)", callback_data="menu:moderate_help")],
-        [InlineKeyboardButton("Domains", callback_data="menu:domains")],
-    ]
-    await update.message.reply_text("Admin panel:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def postmenu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caller = update.effective_user.id
-    if caller not in ADMINS:
-        await update.message.reply_text("Only admin can post & pin the menu.")
-        return
-    keyboard = [
-        [InlineKeyboardButton("Health", callback_data="menu:health")],
-        [InlineKeyboardButton("Search help", callback_data="menu:search")],
-        [InlineKeyboardButton("Moderate (reply)", callback_data="menu:moderate_help")],
-        [InlineKeyboardButton("Domains", callback_data="menu:domains")],
-    ]
-    msg = await update.message.reply_text("Bot quick menu (pin this message):", reply_markup=InlineKeyboardMarkup(keyboard))
-    try:
-        await context.bot.pin_chat_message(chat_id=update.effective_chat.id, message_id=msg.message_id, disable_notification=True)
-        await update.message.reply_text("Menu posted and pinned.")
-    except Exception as e:
-        logging.warning("Pin failed: %s", e)
-        await update.message.reply_text("Menu posted but could not pin (bot needs pin permission).")
-
-# ===== Health command =====
-async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uptime = int(time.time() - start_time)
-    await update.message.reply_text(f"✅ Bot healthy — uptime {uptime}s")
-
-# ===== New: /mute and /unmute text commands (accept reply/@/id/tg://user?id=) =====
+# mute/unmute/mutelist with robust resolution
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caller = update.effective_user.id
-    if caller not in ADMINS:
-        await update.message.reply_text("Only admin can mute users.")
+    if update.effective_user.id not in ADMINS:
+        await update.message.reply_text("Only admin can mute.")
         return
     target_id, desc = await parse_target_id(update, context)
     if not target_id:
-        await update.message.reply_text("Could not determine user. Reply to the user or use @username or numeric id or tg://user?id=... (bot needs the user's id).")
+        await update.message.reply_text("Could not determine user. Use reply / @username / tg://user?id / numeric id / name (DB).")
         return
     chat_id = update.effective_chat.id
+    # optionally confirm presence using get_chat_member
+    try:
+        await context.bot.get_chat_member(chat_id, target_id)
+    except Exception:
+        # still allow muting by DB (best-effort) but inform admin
+        await update.message.reply_text("User resolved but may not be a current chat member (muted in DB).")
     mute_db(chat_id, target_id)
-    await update.message.reply_text(f"Muted {desc} (chat-level).")
-    await send_private_log(context, f"🔇 Muted {desc} (id {target_id}) in chat {chat_id} by {caller}")
+    await update.message.reply_text(f"Muted {desc}")
+    await send_private_log(context, f"🔇 Muted {desc} id:{target_id} in {chat_id} by {update.effective_user.id}")
 
 async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    caller = update.effective_user.id
-    if caller not in ADMINS:
-        await update.message.reply_text("Only admin can unmute users.")
+    if update.effective_user.id not in ADMINS:
+        await update.message.reply_text("Only admin can unmute.")
         return
     target_id, desc = await parse_target_id(update, context)
     if not target_id:
-        await update.message.reply_text("Could not determine user. Reply to the user or use @username or numeric id or tg://user?id=... (bot needs the user's id).")
+        await update.message.reply_text("Could not determine user.")
         return
     chat_id = update.effective_chat.id
     unmute_db(chat_id, target_id)
-    await update.message.reply_text(f"Unmuted {desc}.")
-    await send_private_log(context, f"🔊 Unmuted {desc} (id {target_id}) in chat {chat_id} by {caller}")
+    await update.message.reply_text(f"Unmuted {desc}")
+    await send_private_log(context, f"🔊 Unmuted {desc} id:{target_id} in {chat_id} by {update.effective_user.id}")
 
-# ===== New: /mutelist (list muted users in this chat) =====
 async def mutelist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     uids = muted_list_for_chat(chat_id)
     if not uids:
-        await update.message.reply_text("No muted users in this chat.")
+        await update.message.reply_text("No muted users.")
         return
     lines = []
     for uid in uids:
@@ -654,14 +503,13 @@ async def mutelist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(str(uid))
     await update.message.reply_text("Muted users:\n" + "\n".join(lines))
 
-# ===== New: universal handler to delete any message type from muted users =====
+# message handlers for muting & link deletion
 async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This handler receives ALL message types (except commands) and deletes if user muted in that chat
     if not update.effective_user or not update.effective_chat:
         return
+    save_user_to_db(update.effective_user)
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
-    # do not act on service messages (new members are handled separately)
     if update.message and update.message.new_chat_members:
         return
     if is_muted_db(chat_id, uid):
@@ -671,83 +519,183 @@ async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
         return
-    # not muted: continue (text link handler below)
 
-# ===== Text-only handler for link detection & deletion =====
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Save user
-    if update.effective_user:
-        save_user_to_db(update.effective_user)
-
-    chat_id = update.effective_chat.id
-    user = update.effective_user
+async def handle_text_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_user:
+        return
     text = update.message.text or ""
-
-    # check for URL(s)
     urls = URL_PATTERN.findall(text)
     if not urls:
         return
-
-    for url in urls:
-        try:
-            parsed = urlparse(url if url.startswith("http") else "http://" + url)
-            domain = normalize_domain(parsed.netloc)
-        except:
-            domain = ""
-        if domain and is_domain_allowed(domain):
+    for raw_url in urls:
+        parsed = urlparse(raw_url if raw_url.startswith("http") else "http://" + raw_url)
+        domain = normalize_domain(parsed.netloc)
+        cur.execute("SELECT 1 FROM allowed_domains WHERE domain=?", (domain,))
+        if cur.fetchone():
             return
-        if domain and is_domain_blocked(domain):
+        cur.execute("SELECT 1 FROM blocked_domains WHERE domain=?", (domain,))
+        if cur.fetchone():
             try:
                 await update.message.delete()
             except:
                 pass
-            await send_private_log(context, f"🚨 BLOCKED LINK deleted from {user.full_name} ({user.id}) in chat {chat_id} — {url}")
+            await send_private_log(context, f"🚨 BLOCKED LINK deleted: {raw_url} by {update.effective_user.full_name} ({update.effective_user.id}) in chat {update.effective_chat.id}")
             return
-        if url.startswith("http"):
+        if raw_url.startswith("http"):
             try:
                 await update.message.delete()
             except:
                 pass
-            await send_private_log(context, f"🚨 External link removed from {user.full_name} ({user.id}) in chat {chat_id} — {url}")
+            await send_private_log(context, f"🚨 External link removed: {raw_url} from {update.effective_user.full_name} ({update.effective_user.id}) in chat {update.effective_chat.id}")
             return
 
-# ===== Error handler =====
+# moderation reply-panel & postpanel
+async def moderate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMINS:
+        await update.message.reply_text("Only admin can moderate.")
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a user's message then run /moderate")
+        return
+    target = update.message.reply_to_message.from_user
+    chat_id = update.effective_chat.id
+    keyboard = [
+        [InlineKeyboardButton("Mute", callback_data=f"mod:mute:{chat_id}:{target.id}"),
+         InlineKeyboardButton("Unmute", callback_data=f"mod:unmute:{chat_id}:{target.id}")],
+        [InlineKeyboardButton("Warn +1", callback_data=f"mod:warn:{chat_id}:{target.id}"),
+         InlineKeyboardButton("Reset", callback_data=f"mod:reset:{chat_id}:{target.id}")],
+        [InlineKeyboardButton("Userinfo (log)", callback_data=f"mod:userinfo:{target.id}")]
+    ]
+    await update.message.reply_text(f"Moderation for {target.full_name}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# postpanel: admin replies to a user and posts persistent panel (pin by admin if desired)
+async def postpanel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMINS:
+        await update.message.reply_text("Admin only.")
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a user's message then run /postpanel")
+        return
+    target = update.message.reply_to_message.from_user
+    chat_id = update.effective_chat.id
+    keyboard = [
+        [InlineKeyboardButton("Mute", callback_data=f"mod:mute:{chat_id}:{target.id}"),
+         InlineKeyboardButton("Unmute", callback_data=f"mod:unmute:{chat_id}:{target.id}")],
+        [InlineKeyboardButton("Warn +1", callback_data=f"mod:warn:{chat_id}:{target.id}"),
+         InlineKeyboardButton("Reset", callback_data=f"mod:reset:{chat_id}:{target.id}")],
+        [InlineKeyboardButton("Userinfo (log)", callback_data=f"mod:userinfo:{target.id}")]
+    ]
+    await update.message.reply_text(f"Admin Panel — {target.full_name}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# callback handler for mod actions
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data or ""
+    caller = q.from_user.id
+    if caller not in ADMINS:
+        await q.edit_message_text("Only admin may use these buttons.")
+        return
+    parts = data.split(":")
+    if parts[0] != "mod":
+        await q.edit_message_text("Unknown action")
+        return
+    action = parts[1]
+    if action in ("mute","unmute","warn","reset"):
+        chat_id = int(parts[2]); target_id = int(parts[3])
+        if action == "mute":
+            mute_db(chat_id, target_id); await q.edit_message_text("User muted (DB)."); await send_private_log(context, f"🔇 Muted {target_id} in {chat_id} by {caller}")
+        elif action == "unmute":
+            unmute_db(chat_id, target_id); await q.edit_message_text("User unmuted (DB)."); await send_private_log(context, f"🔊 Unmuted {target_id} in {chat_id} by {caller}")
+        elif action == "warn":
+            cnt = get_warning_count(chat_id, target_id) + 1; set_warning_count(chat_id, target_id, cnt)
+            await q.edit_message_text(f"Warning added. Count = {cnt}"); await send_private_log(context, f"⚠️ Warning for {target_id} in {chat_id}. Now {cnt}")
+        elif action == "reset":
+            reset_warnings(chat_id, target_id); await q.edit_message_text("Warnings reset."); await send_private_log(context, f"🔁 Warnings reset for {target_id} in {chat_id}")
+    elif action == "userinfo":
+        tid = int(parts[2])
+        cur.execute("SELECT user_id, name, username, language FROM users WHERE user_id=?", (tid,))
+        r = cur.fetchone()
+        if not r:
+            await q.edit_message_text("User not in DB.")
+            return
+        user_id, name, username, lang = r
+        text = f"📌 USER INFO\nName: {name}\nUsername: @{username if username else 'None'}\nID: {user_id}\nLang: {lang}"
+        await send_private_log(context, text)
+        await q.edit_message_text("User info sent to private log")
+    else:
+        await q.edit_message_text("Unknown moderation action")
+
+# quick menu/panel
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [
+        [InlineKeyboardButton("Health", callback_data="menu:health")],
+        [InlineKeyboardButton("Search help", callback_data="menu:search")],
+        [InlineKeyboardButton("Moderate (reply)", callback_data="menu:moderate_help")],
+        [InlineKeyboardButton("Domains", callback_data="menu:domains")],
+    ]
+    await update.message.reply_text("Quick menu (pin this message for bottom accessibility):", reply_markup=InlineKeyboardMarkup(kb))
+
+async def menu_cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    parts = (q.data or "").split(":")
+    if len(parts) < 2:
+        await q.edit_message_text("Unknown action"); return
+    a = parts[1]
+    if a == "health":
+        await q.edit_message_text(f"Bot alive. Uptime {int(time.time()-start_time)}s")
+    elif a == "search":
+        await q.edit_message_text("Use /search <query>. Then /choose <number>.")
+    elif a == "moderate_help":
+        await q.edit_message_text("Reply to a user's message, then run /moderate or /postpanel")
+    elif a == "domains":
+        allowed, blocked = list_domains(); await q.edit_message_text("Allowed: "+(", ".join(allowed) if allowed else "— none —")+"\nBlocked: "+(", ".join(blocked) if blocked else "— none —"))
+    else:
+        await q.edit_message_text("Unknown menu action")
+
+# health command
+async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"✅ Bot healthy — uptime {int(time.time() - start_time)}s")
+
+# error handler
 async def error_handler(update, context):
     logging.error("Bot error: %s", context.error)
 
-# ===== Main =====
+# ----- main -----
 def main():
     keep_alive()
     app = ApplicationBuilder().token(TOKEN).build()
 
+    async def on_startup(application):
+        try:
+            await application.bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            logging.exception("delete_webhook failed")
+
     app.add_error_handler(error_handler)
 
-    # new members / track
+    # handlers
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
-    # universal handler for all message types (deletes for muted users)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_all_messages), 0)
-    # text-only handler (link deletion)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text), 1)
-    # track users
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_links), 1)
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, track_users), 2)
 
     # commands
-    app.add_handler(CommandHandler("userinfo", userinfo))
-    app.add_handler(CommandHandler("searchuser", searchuser))
+    app.add_handler(CommandHandler("userinfo", userinfo_cmd))
+    app.add_handler(CommandHandler("searchuser", searchuser_cmd))
+    app.add_handler(CommandHandler("getid", getid_cmd))
     app.add_handler(CommandHandler("search", search_cmd))
     app.add_handler(CommandHandler("choose", choose_cmd))
     app.add_handler(CommandHandler("moderate", moderate_cmd))
+    app.add_handler(CommandHandler("postpanel", postpanel_cmd))
     app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler("panel", panel_cmd))
-    app.add_handler(CommandHandler("postmenu", postmenu_cmd))
+    app.add_handler(CommandHandler("panel", menu_cmd))
     app.add_handler(CommandHandler("health", health_cmd))
 
-    # domain commands
     app.add_handler(CommandHandler("allow", allow_cmd))
     app.add_handler(CommandHandler("block", block_cmd))
     app.add_handler(CommandHandler("listdomains", listdomains_cmd))
 
-    # new commands: mute/unmute/mutelist
     app.add_handler(CommandHandler("mute", mute_cmd))
     app.add_handler(CommandHandler("unmute", unmute_cmd))
     app.add_handler(CommandHandler("mutelist", mutelist_cmd))
@@ -757,7 +705,7 @@ def main():
     app.add_handler(CallbackQueryHandler(menu_cb_handler, pattern=r"^menu:"))
 
     print("Bot started")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, post_init=on_startup)
 
 if __name__ == "__main__":
     main()
